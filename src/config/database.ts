@@ -1,30 +1,25 @@
-import { Sequelize } from 'sequelize';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { env } from './env';
 
-export const sequelize = new Sequelize({
-  dialect: 'postgres',
-  host: env.DB_HOST,
-  port: env.DB_PORT,
-  database: env.DB_NAME,
-  username: env.DB_USER,
-  password: env.DB_PASSWORD,
-  logging: env.NODE_ENV === 'development' ? console.log : false,
-  pool: {
-    max: 10,
-    min: 0,
-    acquire: 30000,
-    idle: 10000,
-  },
-});
+let _supabase: SupabaseClient | null = null;
+
+export function getSupabase(): SupabaseClient {
+  if (!_supabase) {
+    _supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false },
+    });
+  }
+  return _supabase;
+}
 
 export async function connectDatabase(): Promise<void> {
   try {
-    await sequelize.authenticate();
-    console.log('[Database] Connection established successfully.');
-    await sequelize.sync({ alter: env.NODE_ENV === 'development' });
-    console.log('[Database] Models synchronized.');
+    const supabase = getSupabase();
+    const { error } = await supabase.from('profiles').select('id').limit(1);
+    if (error) throw error;
+    console.log('[Database] Supabase connection verified.');
   } catch (error) {
-    console.error('[Database] Unable to connect:', error);
+    console.error('[Database] Unable to connect to Supabase:', error);
     throw error;
   }
 }

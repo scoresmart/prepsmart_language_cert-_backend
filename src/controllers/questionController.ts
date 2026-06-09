@@ -1,48 +1,120 @@
 import { Request, Response, NextFunction } from 'express';
-import { Op } from 'sequelize';
-import { Question } from '../models/Question';
-import { McpService } from '../services/mcpService';
-import { CertificationType, DifficultyLevel, QuestionType, SkillSection } from '../types';
+import { getSupabase } from '../config/database';
 
-const mcpService = new McpService();
+// ─── Writing Questions ────────────────────────────────────────────────────────
 
-export async function getQuestions(req: Request, res: Response, next: NextFunction) {
+// GET /api/v1/questions/writing?task_type=task1
+export async function getWritingQuestions(req: Request, res: Response, next: NextFunction) {
   try {
-    const {
-      certification,
-      section,
-      questionType,
-      difficulty,
-      search,
-      page = '1',
-      limit = '20',
-    } = req.query as Record<string, string>;
+    const { task_type } = req.query;
+    let query = getSupabase()
+      .from('writing_task_questions')
+      .select('id, task_type, question_text, image_path, created_at')
+      .order('created_at', { ascending: false });
 
-    const where: Record<string, unknown> = { isActive: true };
-    if (certification) where.certification = certification;
-    if (section) where.section = section;
-    if (questionType) where.questionType = questionType;
-    if (difficulty) where.difficulty = difficulty;
-    if (search) where.title = { [Op.iLike]: `%${search}%` };
+    if (task_type) query = query.eq('task_type', task_type);
 
-    const pageNum = Math.max(parseInt(page, 10), 1);
-    const limitNum = Math.min(parseInt(limit, 10), 100);
-    const offset = (pageNum - 1) * limitNum;
+    const { data, error } = await query;
+    if (error) throw error;
+    return res.json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
 
-    const { count, rows } = await Question.findAndCountAll({
-      where,
-      limit: limitNum,
-      offset,
-      order: [['createdAt', 'DESC']],
-    });
+// GET /api/v1/questions/writing/:id
+export async function getWritingQuestionById(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { data, error } = await getSupabase()
+      .from('writing_task_questions')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+
+    if (error || !data) return res.status(404).json({ success: false, message: 'Question not found' });
+    return res.json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// POST /api/v1/questions/writing
+export async function createWritingQuestion(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { task_type, question_text, image_path } = req.body;
+    const { data, error } = await getSupabase()
+      .from('writing_task_questions')
+      .insert({ task_type, question_text, image_path, created_by: req.user!.sub })
+      .select()
+      .single();
+
+    if (error) throw error;
+    return res.status(201).json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// PUT /api/v1/questions/writing/:id
+export async function updateWritingQuestion(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { task_type, question_text, image_path } = req.body;
+    const { data, error } = await getSupabase()
+      .from('writing_task_questions')
+      .update({ task_type, question_text, image_path, updated_at: new Date().toISOString() })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return res.json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// DELETE /api/v1/questions/writing/:id
+export async function deleteWritingQuestion(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { error } = await getSupabase()
+      .from('writing_task_questions')
+      .delete()
+      .eq('id', req.params.id);
+
+    if (error) throw error;
+    return res.json({ success: true, message: 'Writing question deleted' });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// ─── Listening Questions ──────────────────────────────────────────────────────
+
+// GET /api/v1/questions/listening?part_number=1&page=1&limit=20
+export async function getListeningQuestions(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { part_number, page = '1', limit = '20' } = req.query as Record<string, string>;
+    const from = (parseInt(page) - 1) * parseInt(limit);
+    const to = from + parseInt(limit) - 1;
+
+    let query = getSupabase()
+      .from('listening_part_questions')
+      .select('*', { count: 'exact' })
+      .order('part_number', { ascending: true })
+      .range(from, to);
+
+    if (part_number) query = query.eq('part_number', parseInt(part_number));
+
+    const { data, error, count } = await query;
+    if (error) throw error;
 
     return res.json({
       success: true,
       data: {
-        questions: rows,
+        questions: data,
         total: count,
-        page: pageNum,
-        totalPages: Math.ceil(count / limitNum),
+        page: parseInt(page),
+        totalPages: Math.ceil((count || 0) / parseInt(limit)),
       },
     });
   } catch (error) {
@@ -50,93 +122,67 @@ export async function getQuestions(req: Request, res: Response, next: NextFuncti
   }
 }
 
-export async function getQuestionById(req: Request, res: Response, next: NextFunction) {
+// GET /api/v1/questions/listening/:id
+export async function getListeningQuestionById(req: Request, res: Response, next: NextFunction) {
   try {
-    const question = await Question.findByPk(req.params.id);
-    if (!question) return res.status(404).json({ success: false, message: 'Question not found' });
-    return res.json({ success: true, data: question });
+    const { data, error } = await getSupabase()
+      .from('listening_part_questions')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+
+    if (error || !data) return res.status(404).json({ success: false, message: 'Question not found' });
+    return res.json({ success: true, data });
   } catch (error) {
     next(error);
   }
 }
 
-export async function createQuestion(req: Request, res: Response, next: NextFunction) {
+// POST /api/v1/questions/listening
+export async function createListeningQuestion(req: Request, res: Response, next: NextFunction) {
   try {
-    const question = await Question.create({ ...req.body, source: 'MANUAL' });
-    return res.status(201).json({ success: true, data: question });
+    const { part_number, audio_path, questions } = req.body;
+    const { data, error } = await getSupabase()
+      .from('listening_part_questions')
+      .insert({ part_number, audio_path, questions, created_by: req.user!.sub })
+      .select()
+      .single();
+
+    if (error) throw error;
+    return res.status(201).json({ success: true, data });
   } catch (error) {
     next(error);
   }
 }
 
-export async function updateQuestion(req: Request, res: Response, next: NextFunction) {
+// PUT /api/v1/questions/listening/:id
+export async function updateListeningQuestion(req: Request, res: Response, next: NextFunction) {
   try {
-    const question = await Question.findByPk(req.params.id);
-    if (!question) return res.status(404).json({ success: false, message: 'Question not found' });
-    await question.update(req.body);
-    return res.json({ success: true, data: question });
+    const { part_number, audio_path, questions } = req.body;
+    const { data, error } = await getSupabase()
+      .from('listening_part_questions')
+      .update({ part_number, audio_path, questions, updated_at: new Date().toISOString() })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return res.json({ success: true, data });
   } catch (error) {
     next(error);
   }
 }
 
-export async function deleteQuestion(req: Request, res: Response, next: NextFunction) {
+// DELETE /api/v1/questions/listening/:id
+export async function deleteListeningQuestion(req: Request, res: Response, next: NextFunction) {
   try {
-    const question = await Question.findByPk(req.params.id);
-    if (!question) return res.status(404).json({ success: false, message: 'Question not found' });
-    await question.update({ isActive: false });
-    return res.json({ success: true, message: 'Question deactivated' });
-  } catch (error) {
-    next(error);
-  }
-}
+    const { error } = await getSupabase()
+      .from('listening_part_questions')
+      .delete()
+      .eq('id', req.params.id);
 
-export async function syncQuestionsFromMcp(req: Request, res: Response, next: NextFunction) {
-  try {
-    const {
-      certification = 'PTE',
-      section,
-      questionType,
-      difficulty,
-      limit = 50,
-    } = req.body as {
-      certification?: CertificationType;
-      section?: SkillSection;
-      questionType?: QuestionType;
-      difficulty?: DifficultyLevel;
-      limit?: number;
-    };
-
-    const mcpQuestions = await mcpService.fetchQuestions({
-      certification,
-      section,
-      questionType,
-      difficulty,
-      limit,
-    });
-
-    let created = 0;
-    let updated = 0;
-
-    for (const q of mcpQuestions) {
-      const [instance, wasCreated] = await Question.findOrCreate({
-        where: { externalId: q.externalId },
-        defaults: { ...q, source: 'MCP', mcpFetchedAt: new Date() },
-      });
-
-      if (!wasCreated) {
-        await instance.update({ ...q, mcpFetchedAt: new Date() });
-        updated++;
-      } else {
-        created++;
-      }
-    }
-
-    return res.json({
-      success: true,
-      message: `MCP sync complete: ${created} created, ${updated} updated`,
-      data: { created, updated, total: mcpQuestions.length },
-    });
+    if (error) throw error;
+    return res.json({ success: true, message: 'Listening question deleted' });
   } catch (error) {
     next(error);
   }

@@ -10,7 +10,7 @@ router.get('/me', getMe);
 router.put('/me', updateProfile);
 
 // Admin only
-router.get('/', authorize('ADMIN'), getAllUsers);
-router.delete('/:id', authorize('ADMIN'), deleteUser);
+router.get('/', authorize('admin'), getAllUsers);
+router.delete('/:id', authorize('admin'), deleteUser);
 
 export default router;

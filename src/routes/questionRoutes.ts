@@ -1,56 +1,34 @@
 import { Router } from 'express';
 import {
-  getQuestions,
-  getQuestionById,
-  createQuestion,
-  updateQuestion,
-  deleteQuestion,
-  syncQuestionsFromMcp,
+  getWritingQuestions,
+  getWritingQuestionById,
+  createWritingQuestion,
+  updateWritingQuestion,
+  deleteWritingQuestion,
+  getListeningQuestions,
+  getListeningQuestionById,
+  createListeningQuestion,
+  updateListeningQuestion,
+  deleteListeningQuestion,
 } from '../controllers/questionController';
 import { authenticate, authorize } from '../middleware/auth';
-import { body, query } from 'express-validator';
-import { validateRequest } from '../middleware/validate';
 
 const router = Router();
 
 router.use(authenticate);
 
-// GET /api/v1/questions?certification=PTE&section=READING&difficulty=MEDIUM&page=1&limit=20
-router.get(
-  '/',
-  [
-    query('certification').optional().isIn(['PTE', 'IELTS', 'TOEFL', 'DUOLINGO']),
-    query('section').optional().isIn(['SPEAKING', 'WRITING', 'READING', 'LISTENING']),
-    query('difficulty').optional().isIn(['EASY', 'MEDIUM', 'HARD']),
-    query('page').optional().isInt({ min: 1 }),
-    query('limit').optional().isInt({ min: 1, max: 100 }),
-  ],
-  validateRequest,
-  getQuestions
-);
+// Writing questions
+router.get('/writing', getWritingQuestions);
+router.get('/writing/:id', getWritingQuestionById);
+router.post('/writing', authorize('tutor', 'admin'), createWritingQuestion);
+router.put('/writing/:id', authorize('tutor', 'admin'), updateWritingQuestion);
+router.delete('/writing/:id', authorize('admin'), deleteWritingQuestion);
 
-router.get('/:id', getQuestionById);
-
-// Teacher / Admin only
-router.post(
-  '/',
-  authorize('TEACHER', 'ADMIN'),
-  [
-    body('certification').isIn(['PTE', 'IELTS', 'TOEFL', 'DUOLINGO']),
-    body('section').isIn(['SPEAKING', 'WRITING', 'READING', 'LISTENING']),
-    body('questionType').notEmpty(),
-    body('title').notEmpty(),
-    body('content').notEmpty(),
-    body('marks').isFloat({ min: 0 }),
-  ],
-  validateRequest,
-  createQuestion
-);
-
-router.put('/:id', authorize('TEACHER', 'ADMIN'), updateQuestion);
-router.delete('/:id', authorize('ADMIN'), deleteQuestion);
-
-// Sync questions from MCP server (Admin only)
-router.post('/sync/mcp', authorize('ADMIN'), syncQuestionsFromMcp);
+// Listening questions
+router.get('/listening', getListeningQuestions);
+router.get('/listening/:id', getListeningQuestionById);
+router.post('/listening', authorize('tutor', 'admin'), createListeningQuestion);
+router.put('/listening/:id', authorize('tutor', 'admin'), updateListeningQuestion);
+router.delete('/listening/:id', authorize('admin'), deleteListeningQuestion);
 
 export default router;

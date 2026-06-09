@@ -1,80 +1,96 @@
 import { Request, Response, NextFunction } from 'express';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import { User } from '../models/User';
-import { env } from '../config/env';
-import { ApiResponse, JwtPayload, UserRole } from '../types';
+import { getSupabase } from '../config/database';
 
-function signToken(payload: JwtPayload): string {
-  return jwt.sign(payload, env.JWT_SECRET, { expiresIn: env.JWT_EXPIRES_IN } as jwt.SignOptions);
-}
-
+// POST /api/v1/auth/register
 export async function register(req: Request, res: Response, next: NextFunction) {
   try {
-    const { name, email, password, role = 'STUDENT' } = req.body;
+    const { name, email, password, role = 'student' } = req.body;
+    const supabase = getSupabase();
 
-    const existing = await User.findOne({ where: { email } });
-    if (existing) {
-      const response: ApiResponse = { success: false, message: 'Email already registered' };
-      return res.status(409).json(response);
+    // Create user in Supabase Auth
+    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: { name, role },
+    });
+
+    if (authError) {
+      return res.status(400).json({ success: false, message: authError.message });
     }
 
-    const passwordHash = await bcrypt.hash(password, 12);
-    const user = await User.create({ name, email, passwordHash, role: role as UserRole });
+    // Profile is auto-created via Supabase DB trigger; update name and role
+    await supabase
+      .from('profiles')
+      .update({ name, role })
+      .eq('id', authData.user.id);
 
-    const token = signToken({ userId: user.id, email: user.email, role: user.role });
-
-    const response: ApiResponse = {
+    return res.status(201).json({
       success: true,
-      data: { user: user.toSafeJSON(), token },
       message: 'Registration successful',
-    };
-    return res.status(201).json(response);
-  } catch (error) {
-    next(error);
-  }
-}
-
-export async function login(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { email, password } = req.body;
-
-    const user = await User.findOne({ where: { email } });
-    if (!user) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
-    }
-
-    const isMatch = await bcrypt.compare(password, user.passwordHash);
-    if (!isMatch) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
-    }
-
-    const token = signToken({ userId: user.id, email: user.email, role: user.role });
-
-    return res.json({
-      success: true,
-      data: { user: user.toSafeJSON(), token },
+      data: { userId: authData.user.id, email: authData.user.email },
     });
   } catch (error) {
     next(error);
   }
 }
 
-export async function refreshToken(req: Request, res: Response, next: NextFunction) {
+// POST /api/v1/auth/login
+export async function login(req: Request, res: Response, next: NextFunction) {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, message: 'No token provided' });
+    const { email, password } = req.body;
+
+    const { data, error } = await getSupabase().auth.signInWithPassword({ email, password });
+    if (error) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, env.JWT_SECRET) as JwtPayload;
-    const newToken = signToken({ userId: decoded.userId, email: decoded.email, role: decoded.role });
-    return res.json({ success: true, data: { token: newToken } });
+
+    return res.json({
+      success: true,
+      data: {
+        access_token: data.session.access_token,
+        refresh_token: data.session.refresh_token,
+        expires_at: data.session.expires_at,
+        user: {
+          id: data.user.id,
+          email: data.user.email,
+        },
+      },
+    });
   } catch (error) {
     next(error);
   }
 }
 
+// POST /api/v1/auth/refresh
+export async function refreshToken(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { refresh_token } = req.body;
+    if (!refresh_token) {
+      return res.status(400).json({ success: false, message: 'refresh_token is required' });
+    }
+
+    const { data, error } = await getSupabase().auth.refreshSession({ refresh_token });
+    if (error || !data.session) {
+      return res.status(401).json({ success: false, message: 'Invalid or expired refresh token' });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        access_token: data.session.access_token,
+        refresh_token: data.session.refresh_token,
+        expires_at: data.session.expires_at,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// POST /api/v1/auth/logout
 export function logout(_req: Request, res: Response) {
+  // Supabase tokens are stateless JWTs — client discards tokens on logout
   return res.json({ success: true, message: 'Logged out successfully' });
 }
+
