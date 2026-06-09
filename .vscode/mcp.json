@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "prepsmart-question-server": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["./mcp-question-server/dist/index.js"],
+      "env": {
+        "NODE_ENV": "development"
+      }
+    }
+  }
+}
