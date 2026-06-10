@@ -11,6 +11,13 @@ import {
   updateListeningQuestion,
   deleteListeningQuestion,
 } from '../controllers/questionController';
+import {
+  getReadingQuestions,
+  getReadingQuestionById,
+  createReadingQuestion,
+  updateReadingQuestion,
+  deleteReadingQuestion,
+} from '../controllers/readingController';
 import { authenticate, authorize } from '../middleware/auth';
 
 const router = Router();
@@ -30,5 +37,12 @@ router.get('/listening/:id', getListeningQuestionById);
 router.post('/listening', authorize('tutor', 'admin'), createListeningQuestion);
 router.put('/listening/:id', authorize('tutor', 'admin'), updateListeningQuestion);
 router.delete('/listening/:id', authorize('admin'), deleteListeningQuestion);
+
+// Reading questions
+router.get('/reading', getReadingQuestions);
+router.get('/reading/:id', getReadingQuestionById);
+router.post('/reading', authorize('tutor', 'admin'), createReadingQuestion);
+router.put('/reading/:id', authorize('tutor', 'admin'), updateReadingQuestion);
+router.delete('/reading/:id', authorize('admin'), deleteReadingQuestion);
 
 export default router;

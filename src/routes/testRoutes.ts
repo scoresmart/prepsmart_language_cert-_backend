@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   getTests,
   getTestById,
+  getTestStructure,
   createTest,
   updateTest,
   deleteTest,
@@ -19,6 +20,7 @@ router.use(authenticate);
 router.get('/', getTests);
 router.get('/my-attempts', getMyAttempts);
 router.get('/:id', getTestById);
+router.get('/:id/structure', getTestStructure);   // Full test for frontend rendering
 
 // Tutor / Admin only
 router.post('/', authorize('tutor', 'admin'), createTest);

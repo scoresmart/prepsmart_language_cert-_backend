@@ -27,7 +27,7 @@ export async function getTests(req: Request, res: Response, next: NextFunction) 
   }
 }
 
-// GET /api/v1/tests/:id  — returns test with all linked question parts
+// GET /api/v1/tests/:id  — returns test metadata only
 export async function getTestById(req: Request, res: Response, next: NextFunction) {
   try {
     const { data: test, error } = await getSupabase()
@@ -37,32 +37,97 @@ export async function getTestById(req: Request, res: Response, next: NextFunctio
       .single();
 
     if (error || !test) return res.status(404).json({ success: false, message: 'Test not found' });
+    return res.json({ success: true, data: test });
+  } catch (error) {
+    next(error);
+  }
+}
 
-    // Fetch all linked listening parts
+// GET /api/v1/tests/:id/structure
+// Returns the complete structured mock test for the frontend to render:
+// { test, listening: [{part, audio_path, questions}], reading: [{part_type, passage, questions}], writing: [{task_type, question_text}] }
+export async function getTestStructure(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { data: test, error } = await getSupabase()
+      .from('language_cert_mock_tests')
+      .select('*')
+      .eq('id', req.params.id)
+      .eq('is_active', true)
+      .single();
+
+    if (error || !test) return res.status(404).json({ success: false, message: 'Test not found' });
+
+    const supabase = getSupabase();
+
+    // Listening: Parts 1–4
     const listeningIds = [
-      test.listening_part1_id, test.listening_part2_id,
-      test.listening_part3_id, test.listening_part4_id,
-    ].filter(Boolean);
+      { part: 1, id: test.listening_part1_id },
+      { part: 2, id: test.listening_part2_id },
+      { part: 3, id: test.listening_part3_id },
+      { part: 4, id: test.listening_part4_id },
+    ].filter((p) => p.id);
 
-    const writingIds = [test.writing_task1_id, test.writing_task2_id].filter(Boolean);
+    // Reading: Parts 1A, 1B, 2, 3, 4
+    const readingIds = [
+      { part_type: 'part1a', id: test.reading_part1a_id },
+      { part_type: 'part1b', id: test.reading_part1b_id },
+      { part_type: 'part2',  id: test.reading_part2_id },
+      { part_type: 'part3',  id: test.reading_part3_id },
+      { part_type: 'part4',  id: test.reading_part4_id },
+    ].filter((p) => p.id);
 
-    const [listeningRes, writingRes] = await Promise.all([
+    // Writing: Task 1, Task 2
+    const writingIds = [
+      { task: 1, id: test.writing_task1_id },
+      { task: 2, id: test.writing_task2_id },
+    ].filter((p) => p.id);
+
+    // Fetch all sections in parallel
+    const [listeningData, readingData, writingData] = await Promise.all([
       listeningIds.length
-        ? getSupabase().from('listening_part_questions').select('*').in('id', listeningIds)
-        : Promise.resolve({ data: [], error: null }),
+        ? supabase
+            .from('listening_part_questions')
+            .select('id, part_number, audio_path, questions')
+            .in('id', listeningIds.map((p) => p.id))
+        : Promise.resolve({ data: [] }),
+
+      readingIds.length
+        ? supabase
+            .from('reading_part_questions')
+            .select('id, part_type, title, passage, image_path, questions, word_bank')
+            .in('id', readingIds.map((p) => p.id))
+        : Promise.resolve({ data: [] }),
+
       writingIds.length
-        ? getSupabase().from('writing_task_questions').select('*').in('id', writingIds)
-        : Promise.resolve({ data: [], error: null }),
+        ? supabase
+            .from('writing_task_questions')
+            .select('id, task_type, question_text, image_path')
+            .in('id', writingIds.map((p) => p.id))
+        : Promise.resolve({ data: [] }),
     ]);
 
-    return res.json({
-      success: true,
-      data: {
-        test,
-        listening_parts: listeningRes.data,
-        writing_tasks: writingRes.data,
+    // Build ordered structure
+    const structure = {
+      id: test.id,
+      title: test.title,
+      description: test.description,
+      sections: {
+        listening: listeningIds.map((p) => ({
+          part: p.part,
+          ...((listeningData.data || []).find((q: any) => q.id === p.id) || {}),
+        })),
+        reading: readingIds.map((p) => ({
+          part_type: p.part_type,
+          ...((readingData.data || []).find((q: any) => q.id === p.id) || {}),
+        })),
+        writing: writingIds.map((p) => ({
+          task: p.task,
+          ...((writingData.data || []).find((q: any) => q.id === p.id) || {}),
+        })),
       },
-    });
+    };
+
+    return res.json({ success: true, data: structure });
   } catch (error) {
     next(error);
   }
