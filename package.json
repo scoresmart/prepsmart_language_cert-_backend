@@ -1,45 +1,47 @@
 {
-  "name": "prepsmart-language-cert-backend",
-  "version": "1.0.0",
-  "description": "Backend API for PrepSmart Language Certification Portal (PTE, IELTS, TOEFL)",
-  "main": "dist/server.js",
-  "scripts": {
-    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
-    "build": "tsc",
-    "start": "node dist/server.js",
-    "lint": "eslint src/**/*.ts",
-    "db:migrate": "ts-node src/config/migrations.ts"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
-    "@supabase/supabase-js": "^2.108.1",
-    "bcryptjs": "^2.4.3",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "express-validator": "^7.2.0",
-    "helmet": "^7.1.0",
-    "jsonwebtoken": "^9.0.2",
-    "morgan": "^1.10.0",
-    "uuid": "^10.0.0",
-    "zod": "^3.23.8"
-  },
-  "devDependencies": {
-    "@types/bcryptjs": "^2.4.6",
-    "@types/cors": "^2.8.17",
-    "@types/express": "^4.17.21",
-    "@types/jsonwebtoken": "^9.0.6",
-    "@types/morgan": "^1.9.9",
-    "@types/node": "^20.14.9",
-    "@types/pg": "^8.11.6",
-    "@types/uuid": "^10.0.0",
-    "@typescript-eslint/eslint-plugin": "^7.14.1",
-    "@typescript-eslint/parser": "^7.14.1",
-    "eslint": "^8.57.0",
-    "ts-node-dev": "^2.0.0",
-    "typescript": "^5.5.2"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  }
+    "name":  "prepsmart-language-cert-backend",
+    "version":  "1.0.0",
+    "description":  "Backend API for PrepSmart Language Certification Portal (PTE, IELTS, TOEFL)",
+    "main":  "dist/server.js",
+    "scripts":  {
+                    "dev":  "ts-node-dev --respawn --transpile-only src/server.ts",
+                    "build":  "tsc",
+                    "start":  "node dist/server.js",
+                    "lint":  "eslint src/**/*.ts",
+                    "db:migrate":  "ts-node src/config/migrations.ts"
+                },
+    "dependencies":  {
+                         "@modelcontextprotocol/sdk":  "^1.12.0",
+                         "@supabase/supabase-js":  "^2.108.1",
+                         "@types/ws":  "^8.18.1",
+                         "bcryptjs":  "^2.4.3",
+                         "cors":  "^2.8.5",
+                         "dotenv":  "^16.4.5",
+                         "express":  "^4.19.2",
+                         "express-validator":  "^7.2.0",
+                         "helmet":  "^7.1.0",
+                         "jsonwebtoken":  "^9.0.2",
+                         "morgan":  "^1.10.0",
+                         "uuid":  "^10.0.0",
+                         "ws":  "^8.21.0",
+                         "zod":  "^3.23.8"
+                     },
+    "devDependencies":  {
+                            "@types/bcryptjs":  "^2.4.6",
+                            "@types/cors":  "^2.8.17",
+                            "@types/express":  "^4.17.21",
+                            "@types/jsonwebtoken":  "^9.0.6",
+                            "@types/morgan":  "^1.9.9",
+                            "@types/node":  "^20.14.9",
+                            "@types/pg":  "^8.11.6",
+                            "@types/uuid":  "^10.0.0",
+                            "@typescript-eslint/eslint-plugin":  "^7.14.1",
+                            "@typescript-eslint/parser":  "^7.14.1",
+                            "eslint":  "^8.57.0",
+                            "ts-node-dev":  "^2.0.0",
+                            "typescript":  "^5.5.2"
+                        },
+    "engines":  {
+                    "node":  "\u003e=20.0.0"
+                }
 }
