@@ -8,7 +8,8 @@
                     "build":  "tsc",
                     "start":  "node dist/server.js",
                     "lint":  "eslint src/**/*.ts",
-                    "db:migrate":  "ts-node src/config/migrations.ts"
+                    "db:migrate":  "ts-node src/config/migrations.ts",
+                    "mcp":  "ts-node src/mcp/server.ts"
                 },
     "dependencies":  {
                          "@modelcontextprotocol/sdk":  "^1.12.0",

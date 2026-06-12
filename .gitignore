@@ -7,6 +7,9 @@ dist/
 .env.local
 .env.*.local
 
+# Migration exports (contains user data)
+migration/
+
 # Logs
 logs/
 *.log
@@ -18,6 +21,7 @@ Thumbs.db
 
 # IDE
 .vscode/settings.json
+.cursor/
 *.suo
 *.ntvs*
 *.njsproj
