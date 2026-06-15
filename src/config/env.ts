@@ -5,7 +5,12 @@ dotenv.config();
 export const env = {
   NODE_ENV: process.env.NODE_ENV || 'development',
   PORT: parseInt(process.env.PORT || '5000', 10),
-  CORS_ORIGIN: process.env.CORS_ORIGIN || 'http://localhost:3000',
+  CORS_ORIGIN:
+    process.env.CORS_ORIGIN ||
+    'http://localhost:5174,http://localhost:5173,http://localhost:3000',
+  CORS_ALLOW_VERCEL: process.env.CORS_ALLOW_VERCEL !== 'false',
+  CORS_ALLOW_RAILWAY: process.env.CORS_ALLOW_RAILWAY !== 'false',
+  CORS_ALLOW_LOCALHOST: process.env.CORS_ALLOW_LOCALHOST === 'true',
 
   // Supabase
   SUPABASE_URL: process.env.SUPABASE_URL || '',
