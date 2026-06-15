@@ -10,6 +10,7 @@ const READING_TASK_TYPES = [
   'reading_part_4',
 ] as const;
 const LISTENING_PARTS = [1, 2, 3, 4] as const;
+const SPEAKING_PARTS = [1, 2, 3, 4] as const;
 
 type PracticeModule = 'speaking' | 'writing' | 'reading' | 'listening';
 
@@ -39,10 +40,23 @@ export async function getPracticeProgress(req: Request, res: Response, next: Nex
   try {
     const student_id = req.user!.sub;
 
-    const [writingCounts, readingCounts, listeningCounts, attemptsRes] = await Promise.all([
+    const [writingCounts, readingCounts, listeningCounts, speakingCounts, attemptsRes] = await Promise.all([
       Promise.all(WRITING_TASK_TYPES.map((task_type) => countRows('writing_task_questions', { task_type }))),
       Promise.all(READING_TASK_TYPES.map((task_type) => countRows('writing_task_questions', { task_type }))),
       Promise.all(LISTENING_PARTS.map((part_number) => countRows('listening_part_questions', { part_number }))),
+      Promise.all(
+        SPEAKING_PARTS.map((part_number) =>
+          getSupabase()
+            .from('speaking_part_questions')
+            .select('id', { count: 'exact', head: true })
+            .eq('part_number', part_number)
+            .eq('is_published', true)
+            .then((r) => {
+              if (r.error) throw r.error;
+              return r.count ?? 0;
+            }),
+        ),
+      ),
       getSupabase()
         .from('practice_attempts')
         .select('question_type, question_set_id')
@@ -66,7 +80,7 @@ export async function getPracticeProgress(req: Request, res: Response, next: Nex
     const writingTotal = writingCounts.reduce((sum, n) => sum + n, 0);
     const readingTotal = readingCounts.reduce((sum, n) => sum + n, 0);
     const listeningTotal = listeningCounts.reduce((sum, n) => sum + n, 0);
-    const speakingTotal = 0;
+    const speakingTotal = speakingCounts.reduce((sum, n) => sum + n, 0);
 
     const modules = {
       speaking: { total: speakingTotal, practiced: practicedByModule.speaking.size },

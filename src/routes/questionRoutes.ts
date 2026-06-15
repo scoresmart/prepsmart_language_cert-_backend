@@ -10,6 +10,8 @@ import {
   createListeningQuestion,
   updateListeningQuestion,
   deleteListeningQuestion,
+  getSpeakingQuestions,
+  getSpeakingQuestionById,
 } from '../controllers/questionController';
 import {
   getReadingQuestions,
@@ -44,5 +46,9 @@ router.get('/reading/:id', getReadingQuestionById);
 router.post('/reading', authorize('tutor', 'admin'), createReadingQuestion);
 router.put('/reading/:id', authorize('tutor', 'admin'), updateReadingQuestion);
 router.delete('/reading/:id', authorize('admin'), deleteReadingQuestion);
+
+// Speaking questions
+router.get('/speaking', getSpeakingQuestions);
+router.get('/speaking/:id', getSpeakingQuestionById);
 
 export default router;

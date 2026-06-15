@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { getSupabase } from '../config/database';
+import { normalizeSpeakingQuestion, withNormalizedSpeakingQuestions } from '../utils/speakingQuestionStructure';
 
 // ─── Writing Questions ────────────────────────────────────────────────────────
 
@@ -183,6 +184,47 @@ export async function deleteListeningQuestion(req: Request, res: Response, next:
 
     if (error) throw error;
     return res.json({ success: true, message: 'Listening question deleted' });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// ─── Speaking Questions ───────────────────────────────────────────────────────
+
+// GET /api/v1/questions/speaking?part_number=1
+export async function getSpeakingQuestions(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { part_number } = req.query as Record<string, string>;
+    let query = getSupabase()
+      .from('speaking_part_questions')
+      .select('id, part_number, task_type, title, level, content, audio_url, image_url, max_score, is_published, created_at')
+      .eq('is_published', true)
+      .order('created_at', { ascending: true });
+
+    if (part_number) query = query.eq('part_number', parseInt(part_number, 10));
+
+    const { data, error } = await query;
+    if (error) throw error;
+    return res.json({ success: true, data: withNormalizedSpeakingQuestions(data ?? []) });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// GET /api/v1/questions/speaking/:id
+export async function getSpeakingQuestionById(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { data, error } = await getSupabase()
+      .from('speaking_part_questions')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+
+    if (error || !data) return res.status(404).json({ success: false, message: 'Question not found' });
+    return res.json({
+      success: true,
+      data: normalizeSpeakingQuestion(data, data.part_number ?? 1),
+    });
   } catch (error) {
     next(error);
   }
