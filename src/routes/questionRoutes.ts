@@ -12,6 +12,9 @@ import {
   deleteListeningQuestion,
   getSpeakingQuestions,
   getSpeakingQuestionById,
+  createSpeakingQuestion,
+  updateSpeakingQuestion,
+  deleteSpeakingQuestion,
 } from '../controllers/questionController';
 import {
   getReadingQuestions,
@@ -50,5 +53,8 @@ router.delete('/reading/:id', authorize('admin'), deleteReadingQuestion);
 // Speaking questions
 router.get('/speaking', getSpeakingQuestions);
 router.get('/speaking/:id', getSpeakingQuestionById);
+router.post('/speaking', authorize('tutor', 'admin'), createSpeakingQuestion);
+router.put('/speaking/:id', authorize('tutor', 'admin'), updateSpeakingQuestion);
+router.delete('/speaking/:id', authorize('admin'), deleteSpeakingQuestion);
 
 export default router;

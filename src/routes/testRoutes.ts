@@ -6,6 +6,7 @@ import {
   createTest,
   updateTest,
   deleteTest,
+  assembleRandomMockTest,
   startAttempt,
   submitAttempt,
   getAttemptResult,
@@ -19,6 +20,7 @@ router.use(authenticate);
 
 router.get('/', getTests);
 router.get('/my-attempts', getMyAttempts);
+router.post('/assemble-random', authorize('tutor', 'admin'), assembleRandomMockTest);
 router.get('/:id', getTestById);
 router.get('/:id/structure', getTestStructure);   // Full test for frontend rendering
 

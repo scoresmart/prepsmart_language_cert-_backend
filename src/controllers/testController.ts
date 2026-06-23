@@ -1,21 +1,49 @@
 import { Request, Response, NextFunction } from 'express';
 import { getSupabase } from '../config/database';
+import { AppRole } from '../types';
+
+function pickRandomId<T extends { id: string }>(rows: T[] | null | undefined): string | null {
+  if (!rows?.length) return null;
+  return rows[Math.floor(Math.random() * rows.length)].id;
+}
+
+async function pickListeningPart(partNumber: number): Promise<string | null> {
+  const { data } = await getSupabase()
+    .from('listening_part_questions')
+    .select('id')
+    .eq('part_number', partNumber);
+  return pickRandomId(data);
+}
+
+async function pickWritingTask(taskType: string): Promise<string | null> {
+  const { data } = await getSupabase()
+    .from('writing_task_questions')
+    .select('id')
+    .eq('task_type', taskType);
+  return pickRandomId(data);
+}
 
 // ─── Language Cert Mock Tests ─────────────────────────────────────────────────
 
-// GET /api/v1/tests?page=1&limit=20
+// GET /api/v1/tests?page=1&limit=20&include_all=true (admin/tutor only)
 export async function getTests(req: Request, res: Response, next: NextFunction) {
   try {
-    const { page = '1', limit = '20' } = req.query as Record<string, string>;
+    const { page = '1', limit = '20', include_all } = req.query as Record<string, string>;
     const from = (parseInt(page) - 1) * parseInt(limit);
     const to = from + parseInt(limit) - 1;
+    const role = req.user?.role as AppRole | undefined;
+    const showAll = include_all === 'true' && (role === 'admin' || role === 'tutor');
 
-    const { data, error, count } = await getSupabase()
+    let query = getSupabase()
       .from('language_cert_mock_tests')
       .select('*', { count: 'exact' })
-      .eq('is_active', true)
-      .order('created_at', { ascending: false })
-      .range(from, to);
+      .order('created_at', { ascending: false });
+
+    if (!showAll) {
+      query = query.eq('is_active', true);
+    }
+
+    const { data, error, count } = await query.range(from, to);
 
     if (error) throw error;
     return res.json({
@@ -93,8 +121,8 @@ export async function getTestStructure(req: Request, res: Response, next: NextFu
 
       readingIds.length
         ? supabase
-            .from('reading_part_questions')
-            .select('id, part_type, title, passage, image_path, questions, word_bank')
+            .from('writing_task_questions')
+            .select('id, task_type, question_text, image_path')
             .in('id', readingIds.map((p) => p.id))
         : Promise.resolve({ data: [] }),
 
@@ -128,6 +156,95 @@ export async function getTestStructure(req: Request, res: Response, next: NextFu
     };
 
     return res.json({ success: true, data: structure });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// POST /api/v1/tests/assemble-random  (admin/tutor — pick random question set per section)
+export async function assembleRandomMockTest(req: Request, res: Response, next: NextFunction) {
+  try {
+    const {
+      title = `Mock Test ${new Date().toISOString().slice(0, 10)}`,
+      description = 'LanguageCert International ESOL — auto-assembled practice mock test.',
+    } = req.body as { title?: string; description?: string };
+
+    const [
+      listening_part1_id,
+      listening_part2_id,
+      listening_part3_id,
+      listening_part4_id,
+      reading_part1a_id,
+      reading_part1b_id,
+      reading_part2_id,
+      reading_part3_id,
+      reading_part4_id,
+      writing_task1_id,
+      writing_task2_id,
+    ] = await Promise.all([
+      pickListeningPart(1),
+      pickListeningPart(2),
+      pickListeningPart(3),
+      pickListeningPart(4),
+      pickWritingTask('reading_part_1a'),
+      pickWritingTask('reading_part_1b'),
+      pickWritingTask('reading_part_2'),
+      pickWritingTask('reading_part_3'),
+      pickWritingTask('reading_part_4'),
+      pickWritingTask('task1'),
+      pickWritingTask('task2'),
+    ]);
+
+    const assigned = [
+      listening_part1_id,
+      listening_part2_id,
+      listening_part3_id,
+      listening_part4_id,
+      reading_part1a_id,
+      reading_part1b_id,
+      reading_part2_id,
+      reading_part3_id,
+      reading_part4_id,
+      writing_task1_id,
+      writing_task2_id,
+    ].filter(Boolean);
+
+    if (assigned.length === 0) {
+      return res.status(422).json({
+        success: false,
+        message: 'No question sets found in the database. Add listening, reading, and writing questions first.',
+      });
+    }
+
+    const { data, error } = await getSupabase()
+      .from('language_cert_mock_tests')
+      .insert({
+        title,
+        description,
+        listening_part1_id,
+        listening_part2_id,
+        listening_part3_id,
+        listening_part4_id,
+        reading_part1a_id,
+        reading_part1b_id,
+        reading_part2_id,
+        reading_part3_id,
+        reading_part4_id,
+        writing_task1_id,
+        writing_task2_id,
+        is_active: true,
+        created_by: req.user!.sub,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    return res.status(201).json({
+      success: true,
+      data,
+      message: `Mock test created with ${assigned.length}/11 sections assigned.`,
+    });
   } catch (error) {
     next(error);
   }

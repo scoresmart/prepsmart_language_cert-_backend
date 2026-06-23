@@ -10,7 +10,7 @@ export async function getReadingQuestions(req: Request, res: Response, next: Nex
 
     let query = getSupabase()
       .from('reading_part_questions')
-      .select('id, part_type, title, passage, image_path, word_bank, created_at', { count: 'exact' })
+      .select('id, part_type, title, passage, image_path, questions, word_bank, created_at', { count: 'exact' })
       .eq('is_active', true)
       .order('created_at', { ascending: false })
       .range(from, to);

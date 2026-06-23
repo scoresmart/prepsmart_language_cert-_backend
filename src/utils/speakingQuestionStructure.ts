@@ -1,6 +1,7 @@
 import { resolveSpeakingAudioUrl } from './speakingTestAudio';
 
-export const SPEAKING_DEFAULT_MAX_SCORE = 90;
+/** LanguageCert speaking is scored 0–50 (12 raw marks scaled). */
+export const SPEAKING_DEFAULT_MAX_SCORE = 50;
 export const SPEAKING_DEFAULT_LEVEL = 'B1';
 
 export const SPEAKING_DEFAULT_PROMPT =

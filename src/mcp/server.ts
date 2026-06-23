@@ -185,6 +185,31 @@ server.tool(
   }
 );
 
+server.tool(
+  'list_speaking_questions',
+  'List speaking part questions with optional filter by part number (1-4)',
+  {
+    part_number: z.number().min(1).max(4).optional(),
+    page: z.number().optional().default(1),
+    limit: z.number().optional().default(20),
+  },
+  async ({ part_number, page, limit }) => {
+    const from = (page - 1) * limit;
+    const to = from + limit - 1;
+    let query = getSupabase()
+      .from('speaking_part_questions')
+      .select('id, part_number, task_type, title, level, is_published, created_at', { count: 'exact' })
+      .order('part_number', { ascending: true })
+      .range(from, to);
+
+    if (part_number) query = query.eq('part_number', part_number);
+
+    const { data, error, count } = await query;
+    if (error) return { content: [{ type: 'text', text: `Error: ${error.message}` }] };
+    return { content: [{ type: 'text', text: JSON.stringify({ questions: data, total: count }, null, 2) }] };
+  }
+);
+
 // ── Health ────────────────────────────────────────────────────────────────────
 
 server.tool('health_check', 'Check Supabase connection status', {}, async () => {

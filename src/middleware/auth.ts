@@ -2,6 +2,15 @@ import { Request, Response, NextFunction } from 'express';
 import { getSupabase } from '../config/database';
 import { AppRole, JwtPayload } from '../types';
 
+const ADMIN_EMAILS = ['contact@scoresmartpte.com', 'kulmeetgamingpoint@gmail.com', 'singhkulmeet67@gmail.com'];
+
+function resolveRole(email: string | undefined, profileRole: AppRole | undefined): AppRole {
+  if (email && ADMIN_EMAILS.includes(email.toLowerCase())) {
+    return 'admin';
+  }
+  return profileRole || 'student';
+}
+
 declare global {
   namespace Express {
     interface Request {
@@ -34,7 +43,7 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
     req.user = {
       sub: data.user.id,
       email: data.user.email,
-      role: (profile?.role as AppRole) || 'student',
+      role: resolveRole(data.user.email, profile?.role as AppRole | undefined),
     };
     return next();
   } catch {

@@ -2,13 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { getSupabase } from '../config/database';
 
 const WRITING_TASK_TYPES = ['task1', 'task2'] as const;
-const READING_TASK_TYPES = [
-  'reading_part_1a',
-  'reading_part_1b',
-  'reading_part_2',
-  'reading_part_3',
-  'reading_part_4',
-] as const;
+const READING_PART_TYPES = ['part1a', 'part1b', 'part2', 'part3', 'part4'] as const;
 const LISTENING_PARTS = [1, 2, 3, 4] as const;
 const SPEAKING_PARTS = [1, 2, 3, 4] as const;
 
@@ -24,7 +18,7 @@ function moduleForQuestionType(questionType: string): PracticeModule | null {
 
 async function countRows(
   table: string,
-  filters: Record<string, string | number>,
+  filters: Record<string, string | number | boolean>,
 ): Promise<number> {
   let query = getSupabase().from(table).select('id', { count: 'exact', head: true });
   for (const [key, value] of Object.entries(filters)) {
@@ -42,7 +36,7 @@ export async function getPracticeProgress(req: Request, res: Response, next: Nex
 
     const [writingCounts, readingCounts, listeningCounts, speakingCounts, attemptsRes] = await Promise.all([
       Promise.all(WRITING_TASK_TYPES.map((task_type) => countRows('writing_task_questions', { task_type }))),
-      Promise.all(READING_TASK_TYPES.map((task_type) => countRows('writing_task_questions', { task_type }))),
+      Promise.all(READING_PART_TYPES.map((part_type) => countRows('reading_part_questions', { part_type, is_active: true }))),
       Promise.all(LISTENING_PARTS.map((part_number) => countRows('listening_part_questions', { part_number }))),
       Promise.all(
         SPEAKING_PARTS.map((part_number) =>

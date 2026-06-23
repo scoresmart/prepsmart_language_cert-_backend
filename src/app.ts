@@ -22,6 +22,7 @@ import communityRoutes from './routes/communityRoutes';
 import assessmentRoutes from './routes/assessmentRoutes';
 import templateRoutes from './routes/templateRoutes';
 import practiceRoutes from './routes/practiceRoutes';
+import scoringRoutes from './routes/scoringRoutes';
 
 const app = express();
 
@@ -66,6 +67,7 @@ app.use('/api/v1/communities', communityRoutes);
 app.use('/api/v1/assessments', assessmentRoutes);
 app.use('/api/v1/templates', templateRoutes);
 app.use('/api/v1/practice', practiceRoutes);
+app.use('/api/v1/scoring', scoringRoutes);
 
 // Error handling
 app.use(notFoundHandler);
