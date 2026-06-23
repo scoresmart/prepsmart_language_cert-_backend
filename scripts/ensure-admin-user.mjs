@@ -14,9 +14,10 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 config({ path: join(ROOT, '.env') });
 
-const ADMIN_EMAIL = 'contact@scoresmartpte.com';
-const ADMIN_PASSWORD = 'SCORE2026';
-const ADMIN_NAME = 'Score Smart Admin';
+const ADMIN_ACCOUNTS = [
+  { email: 'contact@scoresmartpte.com', password: 'SCORE2026', name: 'Score Smart Admin' },
+  { email: 'scoresmartpte@gmail.com', password: 'SCORE2026', name: 'Score Smart PTE' },
+];
 
 const url = process.env.SUPABASE_URL;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -43,7 +44,7 @@ async function findUserByEmail(email) {
   }
 }
 
-async function ensureProfile(userId, email) {
+async function ensureProfile(userId, email, name) {
   const { data: existing, error: selectError } = await supabase
     .from('profiles')
     .select('id, role')
@@ -55,7 +56,7 @@ async function ensureProfile(userId, email) {
   const payload = {
     id: userId,
     email,
-    name: ADMIN_NAME,
+    name,
     role: 'admin',
     approval_status: 'approved',
   };
@@ -71,44 +72,50 @@ async function ensureProfile(userId, email) {
   return 'created';
 }
 
-async function main() {
-  console.log(`Ensuring admin user: ${ADMIN_EMAIL}`);
+async function ensureAdminAccount({ email, password, name }) {
+  console.log(`\nEnsuring admin user: ${email}`);
 
-  let user = await findUserByEmail(ADMIN_EMAIL);
+  let user = await findUserByEmail(email);
 
   if (user) {
     const { data, error } = await supabase.auth.admin.updateUserById(user.id, {
-      password: ADMIN_PASSWORD,
+      password,
       email_confirm: true,
-      user_metadata: { name: ADMIN_NAME, role: 'admin' },
+      user_metadata: { name, role: 'admin' },
     });
     if (error) throw error;
     user = data.user;
-    console.log('Updated existing auth user password.');
+    console.log('Updated existing auth user (password + email verified).');
   } else {
     const { data, error } = await supabase.auth.admin.createUser({
-      email: ADMIN_EMAIL,
-      password: ADMIN_PASSWORD,
+      email,
+      password,
       email_confirm: true,
-      user_metadata: { name: ADMIN_NAME, role: 'admin' },
+      user_metadata: { name, role: 'admin' },
     });
     if (error) throw error;
     user = data.user;
-    console.log('Created new auth user.');
+    console.log('Created new auth user (email pre-verified).');
   }
 
-  const profileAction = await ensureProfile(user.id, ADMIN_EMAIL);
+  const profileAction = await ensureProfile(user.id, email, name);
   console.log(`Profile ${profileAction} with admin role.`);
 
   const { data: signIn, error: signInError } = await supabase.auth.signInWithPassword({
-    email: ADMIN_EMAIL,
-    password: ADMIN_PASSWORD,
+    email,
+    password,
   });
   if (signInError) throw signInError;
   if (!signIn.session) throw new Error('Sign-in verification failed: no session returned');
 
-  console.log('Verified login with SCORE2026.');
-  console.log('Admin ready:', ADMIN_EMAIL);
+  console.log(`Verified login for ${email}`);
+}
+
+async function main() {
+  for (const account of ADMIN_ACCOUNTS) {
+    await ensureAdminAccount(account);
+  }
+  console.log('\nAll admin accounts ready.');
 }
 
 main().catch((err) => {

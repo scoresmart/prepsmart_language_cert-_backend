@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { getSupabase } from '../config/database';
 import { AppRole, JwtPayload } from '../types';
 
-const ADMIN_EMAILS = ['contact@scoresmartpte.com'];
+const ADMIN_EMAILS = ['contact@scoresmartpte.com', 'scoresmartpte@gmail.com'];
 
 function resolveRole(email: string | undefined, profileRole: AppRole | undefined): AppRole {
   if (email && ADMIN_EMAILS.includes(email.toLowerCase())) {
