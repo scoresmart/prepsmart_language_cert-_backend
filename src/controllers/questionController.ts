@@ -1,6 +1,32 @@
 import { Request, Response, NextFunction } from 'express';
+import { randomUUID } from 'crypto';
 import { getSupabase } from '../config/database';
+import { audioUpload } from './scoringController';
+import {
+  ensureSpeakingAudioBucket,
+  speakingAudioPublicUrl,
+  SPEAKING_AUDIO_BUCKET,
+} from '../utils/ensureSpeakingAudioBucket';
 import { normalizeSpeakingQuestion, withNormalizedSpeakingQuestions } from '../utils/speakingQuestionStructure';
+
+function speakingAudioExtension(mime: string, originalName?: string): string {
+  const map: Record<string, string> = {
+    'audio/mpeg': 'mp3',
+    'audio/mp3': 'mp3',
+    'audio/wav': 'wav',
+    'audio/wave': 'wav',
+    'audio/x-wav': 'wav',
+    'audio/webm': 'webm',
+    'audio/ogg': 'ogg',
+    'audio/mp4': 'm4a',
+    'audio/x-m4a': 'm4a',
+  };
+  if (map[mime]) return map[mime];
+  const fromName = originalName?.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+  return fromName || 'mp3';
+}
+
+// speakingAudioPublicUrl imported from ensureSpeakingAudioBucket
 
 // ─── Writing Questions ────────────────────────────────────────────────────────
 
@@ -346,4 +372,45 @@ export async function deleteSpeakingQuestion(req: Request, res: Response, next: 
   } catch (error) {
     next(error);
   }
+}
+
+// POST /api/v1/questions/speaking/upload-audio (multipart)
+export async function uploadSpeakingAudio(req: Request, res: Response, next: NextFunction) {
+  audioUpload(req, res, async (uploadErr) => {
+    try {
+      if (uploadErr) {
+        return res.status(400).json({ success: false, message: uploadErr.message });
+      }
+      if (!req.file) {
+        return res.status(400).json({ success: false, message: 'No audio file provided' });
+      }
+
+      const ext = speakingAudioExtension(req.file.mimetype, req.file.originalname);
+      const path = `${new Date().toISOString().slice(0, 10)}/${randomUUID()}.${ext}`;
+
+      await ensureSpeakingAudioBucket();
+
+      const { error } = await getSupabase()
+        .storage
+        .from(SPEAKING_AUDIO_BUCKET)
+        .upload(path, req.file.buffer, {
+          contentType: req.file.mimetype,
+          upsert: false,
+        });
+
+      if (error) {
+        return res.status(500).json({ success: false, message: error.message });
+      }
+
+      return res.status(201).json({
+        success: true,
+        data: {
+          path,
+          publicUrl: speakingAudioPublicUrl(path),
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
 }

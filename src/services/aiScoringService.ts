@@ -33,7 +33,7 @@ async function callClaude(prompt: string) {
   try {
     return await getClient().messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
+      max_tokens: 1536,
       messages: [{ role: 'user', content: prompt }],
     });
   } catch (error) {
@@ -62,7 +62,14 @@ export interface WritingScoreResult {
     organisation: string;
     overall: string;
   };
+  errors: WritingError[];
   grade: 'High Pass' | 'Pass' | 'Below Pass';
+}
+
+export interface WritingError {
+  word: string;
+  type: 'spelling' | 'grammar' | 'article' | string;
+  correction: string;
 }
 
 export interface SpeakingScoreResult {
@@ -87,9 +94,8 @@ export interface SpeakingScoreResult {
     overall: string;
   };
   grade: 'High Pass' | 'Pass' | 'Below Pass';
+  recordingUrl?: string;
 }
-
-// ─── Word count limits ────────────────────────────────────────────────────────
 
 const WORD_COUNT_LIMITS: Record<CEFRLevel, { task1: { min: number; max: number }; task2: { min: number; max: number } }> = {
   A1: { task1: { min: 20, max: 40 }, task2: { min: 15, max: 35 } },
@@ -148,6 +154,9 @@ INSTRUCTIONS:
 - Do not round up out of sympathy.
 - Provide one concise sentence of justification per criterion.
 - Provide 2–3 sentences of overall feedback with specific, actionable improvement tips.
+- Identify every genuine spelling mistake in the candidate response. Use the exact misspelled word/phrase as written.
+- Only flag clear spelling errors — do NOT flag correct British/American variants or correct English.
+- Include grammar or article errors only when they are clear mistakes (not stylistic preferences).
 
 Respond ONLY with valid JSON in this exact format (no markdown, no extra text):
 {
@@ -163,7 +172,11 @@ Respond ONLY with valid JSON in this exact format (no markdown, no extra text):
     "vocabulary": "<one sentence>",
     "organisation": "<one sentence>",
     "overall": "<2-3 sentences with specific improvement tips>"
-  }
+  },
+  "errors": [
+    {"word": "<exact misspelled word as written>", "type": "spelling", "correction": "<correct spelling>"},
+    {"word": "<wrong phrase>", "type": "grammar", "correction": "<correct form>"}
+  ]
 }`;
 
   const message = await callClaude(prompt);
@@ -177,6 +190,15 @@ Respond ONLY with valid JSON in this exact format (no markdown, no extra text):
   const s = parsed.scores;
   const total = s.taskFulfilment + s.grammar + s.vocabulary + s.organisation;
   const grade = total >= 10 ? 'High Pass' : total >= 6 ? 'Pass' : 'Below Pass';
+  const errors: WritingError[] = Array.isArray(parsed.errors)
+    ? parsed.errors.filter(
+        (e: unknown): e is WritingError =>
+          !!e &&
+          typeof e === 'object' &&
+          typeof (e as WritingError).word === 'string' &&
+          typeof (e as WritingError).correction === 'string',
+      )
+    : [];
 
   return {
     type: 'writing',
@@ -185,6 +207,7 @@ Respond ONLY with valid JSON in this exact format (no markdown, no extra text):
     wordCount,
     scores: { ...s, total },
     feedback: parsed.feedback,
+    errors,
     grade,
   };
 }

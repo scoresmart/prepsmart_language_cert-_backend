@@ -1,19 +1,76 @@
 import { Request, Response, NextFunction } from 'express';
 import multer from 'multer';
+import { randomUUID } from 'crypto';
+import { readFile, unlink } from 'fs/promises';
+import { tmpdir } from 'os';
 import { scoreWritingResponse, transcribeAndScoreSpeaking, scoreSpeakingTranscript } from '../services/aiScoringService';
 import { scoreObjectiveAnswers, StudentAnswerEntry } from '../services/objectiveScoringService';
 import { CEFRLevel, WRITING_MARK_SCHEMES, SPEAKING_MARK_SCHEMES } from '../utils/languageCertMarkScheme';
 import { getSupabase } from '../config/database';
+import {
+  ensureSpeakingAudioBucket,
+  SPEAKING_AUDIO_BUCKET,
+  speakingAudioPublicUrl,
+} from '../utils/ensureSpeakingAudioBucket';
 
 const VALID_LEVELS: CEFRLevel[] = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
 
-// ─── Multer — in-memory audio upload (max 25MB) ───────────────────────────────
+function normalizeScoringLevel(level: string): CEFRLevel {
+  const upper = level.trim().toUpperCase();
+  if (VALID_LEVELS.includes(upper as CEFRLevel)) return upper as CEFRLevel;
+  const lower = level.trim().toLowerCase();
+  if (lower.includes('easy') || lower.includes('beginner')) return 'A2';
+  if (lower.includes('medium') || lower.includes('intermediate')) return 'B1';
+  if (lower.includes('hard') || lower.includes('advanced')) return 'B2';
+  return 'B1';
+}
+
+async function savePracticeRecording(
+  studentId: string,
+  attemptId: string | undefined,
+  buffer: Buffer,
+  mimeType: string,
+): Promise<string | null> {
+  try {
+    await ensureSpeakingAudioBucket();
+    const ext = mimeType.includes('wav') ? 'wav' : mimeType.includes('webm') ? 'webm' : 'audio';
+    const path = `practice-recordings/${studentId}/${attemptId ?? randomUUID()}.${ext}`;
+    const { error } = await getSupabase()
+      .storage
+      .from(SPEAKING_AUDIO_BUCKET)
+      .upload(path, buffer, { contentType: mimeType, upsert: true });
+    if (error) {
+      console.warn('[Scoring] Could not save practice recording:', error.message);
+      return null;
+    }
+    console.log(`[Scoring] Practice recording saved: ${path}`);
+    return speakingAudioPublicUrl(path);
+  } catch (err) {
+    console.warn('[Scoring] Practice recording save failed:', err);
+    return null;
+  }
+}
+
+// ─── Multer — disk-based audio upload (max 25MB, avoids RAM spike under load) ──
 
 export const audioUpload = multer({
-  storage: multer.memoryStorage(),
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, tmpdir()),
+    filename: (_req, _file, cb) => cb(null, `speaking-audio-${randomUUID()}`),
+  }),
   limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    const allowed = ['audio/wav', 'audio/wave', 'audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/webm', 'audio/mp4'];
+    const allowed = [
+      'audio/wav',
+      'audio/wave',
+      'audio/x-wav',
+      'audio/mpeg',
+      'audio/mp3',
+      'audio/ogg',
+      'audio/webm',
+      'audio/mp4',
+      'application/octet-stream',
+    ];
     if (allowed.includes(file.mimetype)) {
       cb(null, true);
     } else {
@@ -103,6 +160,8 @@ export async function scoreSpeakingAudio(req: Request, res: Response, next: Next
       return res.status(400).json({ success: false, message: uploadErr.message });
     }
 
+    const tempPath = req.file?.path;
+
     try {
       const { level, task_description, attempt_id } = req.body;
 
@@ -114,9 +173,18 @@ export async function scoreSpeakingAudio(req: Request, res: Response, next: Next
         return res.status(400).json({ success: false, message: 'level and task_description are required' });
       }
 
-      if (!VALID_LEVELS.includes(level as CEFRLevel)) {
-        return res.status(400).json({ success: false, message: `level must be one of: ${VALID_LEVELS.join(', ')}` });
-      }
+      const cefrLevel = normalizeScoringLevel(String(level));
+      const mimeType = req.file.mimetype || 'audio/wav';
+
+      // Read from disk — avoids keeping the entire file in RAM alongside other concurrent uploads
+      const audioBuffer = await readFile(req.file.path);
+
+      const recordingUrl = await savePracticeRecording(
+        req.user!.sub,
+        attempt_id,
+        audioBuffer,
+        mimeType,
+      );
 
       // Mark attempt as scoring immediately (frontend shows loader)
       if (attempt_id) {
@@ -128,11 +196,15 @@ export async function scoreSpeakingAudio(req: Request, res: Response, next: Next
       }
 
       const result = await transcribeAndScoreSpeaking(
-        req.file.buffer,
-        req.file.mimetype,
+        audioBuffer,
+        mimeType,
         task_description,
-        level as CEFRLevel,
+        cefrLevel,
       );
+
+      if (recordingUrl) {
+        result.recordingUrl = recordingUrl;
+      }
 
       // Persist score
       if (attempt_id) {
@@ -158,6 +230,11 @@ export async function scoreSpeakingAudio(req: Request, res: Response, next: Next
           .eq('student_id', req.user!.sub);
       }
       next(error);
+    } finally {
+      // Always delete the temp file — whether the request succeeded or failed
+      if (tempPath) {
+        unlink(tempPath).catch(() => {});
+      }
     }
   });
 }

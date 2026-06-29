@@ -15,6 +15,15 @@ async function pickListeningPart(partNumber: number): Promise<string | null> {
   return pickRandomId(data);
 }
 
+async function pickReadingPart(partType: string): Promise<string | null> {
+  const { data } = await getSupabase()
+    .from('reading_part_questions')
+    .select('id')
+    .eq('part_type', partType)
+    .eq('is_active', true);
+  return pickRandomId(data);
+}
+
 async function pickWritingTask(taskType: string): Promise<string | null> {
   const { data } = await getSupabase()
     .from('writing_task_questions')
@@ -121,8 +130,8 @@ export async function getTestStructure(req: Request, res: Response, next: NextFu
 
       readingIds.length
         ? supabase
-            .from('writing_task_questions')
-            .select('id, task_type, question_text, image_path')
+            .from('reading_part_questions')
+            .select('id, part_type, title, passage, image_path, questions, word_bank')
             .in('id', readingIds.map((p) => p.id))
         : Promise.resolve({ data: [] }),
 
@@ -166,7 +175,7 @@ export async function assembleRandomMockTest(req: Request, res: Response, next: 
   try {
     const {
       title = `Mock Test ${new Date().toISOString().slice(0, 10)}`,
-      description = 'LanguageCert International ESOL — auto-assembled practice mock test.',
+      description = 'LanguageCert Academic — auto-assembled practice mock test.',
     } = req.body as { title?: string; description?: string };
 
     const [
@@ -186,11 +195,11 @@ export async function assembleRandomMockTest(req: Request, res: Response, next: 
       pickListeningPart(2),
       pickListeningPart(3),
       pickListeningPart(4),
-      pickWritingTask('reading_part_1a'),
-      pickWritingTask('reading_part_1b'),
-      pickWritingTask('reading_part_2'),
-      pickWritingTask('reading_part_3'),
-      pickWritingTask('reading_part_4'),
+      pickReadingPart('part1a'),
+      pickReadingPart('part1b'),
+      pickReadingPart('part2'),
+      pickReadingPart('part3'),
+      pickReadingPart('part4'),
       pickWritingTask('task1'),
       pickWritingTask('task2'),
     ]);

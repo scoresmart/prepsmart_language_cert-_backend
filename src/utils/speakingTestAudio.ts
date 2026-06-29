@@ -14,11 +14,15 @@ export function pickSpeakingTestAudio(seed = 0): string {
 export function resolveSpeakingAudioUrl(
   audioUrl: string | null | undefined,
   seed = 0,
-  storageBase = 'https://sepzceaicoldqhyxxzff.supabase.co/storage/v1/object/public/listening-audio',
+  storageBase = 'https://sepzceaicoldqhyxxzff.supabase.co/storage/v1/object/public/speaking-audio',
+  legacyStorageBase = 'https://sepzceaicoldqhyxxzff.supabase.co/storage/v1/object/public/listening-audio',
 ): string {
   if (audioUrl?.trim()) {
     const trimmed = audioUrl.trim();
     if (trimmed.startsWith('http')) return trimmed;
+    if (trimmed.startsWith('listening/') || trimmed.startsWith('legacy-listening/')) {
+      return `${legacyStorageBase}/${trimmed.replace(/^legacy-listening\//, '')}`;
+    }
     return `${storageBase}/${trimmed}`;
   }
   return pickSpeakingTestAudio(seed);

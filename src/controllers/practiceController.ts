@@ -126,7 +126,7 @@ export async function getMyAttempts(req: Request, res: Response, next: NextFunct
       .select('*')
       .eq('student_id', req.user!.sub)
       .order('created_at', { ascending: false })
-      .limit(100);
+      .limit(500);
 
     if (question_type) query = query.eq('question_type', question_type as string);
 

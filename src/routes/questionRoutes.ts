@@ -15,6 +15,7 @@ import {
   createSpeakingQuestion,
   updateSpeakingQuestion,
   deleteSpeakingQuestion,
+  uploadSpeakingAudio,
 } from '../controllers/questionController';
 import {
   getReadingQuestions,
@@ -52,6 +53,7 @@ router.delete('/reading/:id', authorize('admin'), deleteReadingQuestion);
 
 // Speaking questions
 router.get('/speaking', getSpeakingQuestions);
+router.post('/speaking/upload-audio', authorize('tutor', 'admin'), uploadSpeakingAudio);
 router.get('/speaking/:id', getSpeakingQuestionById);
 router.post('/speaking', authorize('tutor', 'admin'), createSpeakingQuestion);
 router.put('/speaking/:id', authorize('tutor', 'admin'), updateSpeakingQuestion);
