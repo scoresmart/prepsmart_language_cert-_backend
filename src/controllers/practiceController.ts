@@ -137,3 +137,48 @@ export async function getMyAttempts(req: Request, res: Response, next: NextFunct
     next(error);
   }
 }
+
+// GET /api/v1/practice/attempts/admin  (admin/tutor — all student practice logs)
+export async function getAdminPracticeLogs(req: Request, res: Response, next: NextFunction) {
+  try {
+    const limit = Math.min(parseInt(String(req.query.limit ?? '500'), 10) || 500, 1000);
+
+    const { data: attempts, error } = await getSupabase()
+      .from('practice_attempts')
+      .select('id, student_id, question_type, question_set_id, score, total, scoring_status, created_at')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error) throw error;
+
+    const studentIds = [...new Set((attempts ?? []).map((row) => row.student_id))];
+    const profileMap = new Map<string, { name?: string | null; email?: string | null }>();
+
+    if (studentIds.length > 0) {
+      const { data: profiles, error: profileError } = await getSupabase()
+        .from('profiles')
+        .select('id, name, email')
+        .in('id', studentIds);
+
+      if (profileError) throw profileError;
+
+      for (const profile of profiles ?? []) {
+        profileMap.set(profile.id, { name: profile.name, email: profile.email });
+      }
+    }
+
+    const rows = (attempts ?? []).map((row) => {
+      const profile = profileMap.get(row.student_id);
+      return {
+        ...row,
+        module: moduleForQuestionType(row.question_type),
+        student_name: profile?.name ?? null,
+        student_email: profile?.email ?? null,
+      };
+    });
+
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    next(error);
+  }
+}

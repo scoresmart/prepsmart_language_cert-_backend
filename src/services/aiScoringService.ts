@@ -95,6 +95,10 @@ export interface SpeakingScoreResult {
   };
   grade: 'High Pass' | 'Pass' | 'Below Pass';
   recordingUrl?: string;
+  contentMetrics?: {
+    wordsSpoken: number;
+  };
+  wordsToPractice?: Array<{ word: string; tip: string }>;
 }
 
 const WORD_COUNT_LIMITS: Record<CEFRLevel, { task1: { min: number; max: number }; task2: { min: number; max: number } }> = {
@@ -251,6 +255,8 @@ INSTRUCTIONS:
 - Do not round up out of sympathy.
 - Provide one concise sentence per criterion.
 - Provide 2–3 sentences of overall actionable feedback.
+- Count how many words the candidate spoke in the transcript.
+- List up to 6 words or short phrases from the transcript that suggest pronunciation or fluency difficulty (repetitions, filler-heavy segments, unclear fragments, obvious hesitation). If none stand out, return an empty array.
 
 Respond ONLY with valid JSON in this exact format (no markdown, no extra text):
 {
@@ -266,7 +272,13 @@ Respond ONLY with valid JSON in this exact format (no markdown, no extra text):
     "vocabulary": "<one sentence>",
     "pronunciationFluency": "<one sentence>",
     "overall": "<2-3 sentences with specific improvement tips>"
-  }
+  },
+  "contentMetrics": {
+    "wordsSpoken": <integer>
+  },
+  "wordsToPractice": [
+    { "word": "<word or phrase>", "tip": "<short pronunciation or fluency tip>" }
+  ]
 }`;
 
   const message = await callClaude(prompt);
@@ -279,6 +291,20 @@ Respond ONLY with valid JSON in this exact format (no markdown, no extra text):
   const rawTotal = s.taskFulfilmentCoherence + s.grammar + s.vocabulary + s.pronunciationFluency;
   const scaledTotal = scaleSpeakingScore(rawTotal);
   const grade = scaledTotal >= 38 ? 'High Pass' : scaledTotal >= 25 ? 'Pass' : 'Below Pass';
+  const wordsSpoken =
+    typeof parsed.contentMetrics?.wordsSpoken === 'number'
+      ? parsed.contentMetrics.wordsSpoken
+      : transcript.trim().split(/\s+/).filter(Boolean).length;
+  const wordsToPractice = Array.isArray(parsed.wordsToPractice)
+    ? parsed.wordsToPractice
+        .filter((item: unknown) => item && typeof item === 'object')
+        .map((item: { word?: string; tip?: string }) => ({
+          word: String(item.word ?? '').trim(),
+          tip: String(item.tip ?? 'This word needs pronunciation practice.').trim(),
+        }))
+        .filter((item: { word: string }) => item.word.length > 0)
+        .slice(0, 8)
+    : [];
 
   return {
     type: 'speaking',
@@ -289,6 +315,8 @@ Respond ONLY with valid JSON in this exact format (no markdown, no extra text):
     scores: { ...s, rawTotal, scaledTotal },
     feedback: parsed.feedback,
     grade,
+    contentMetrics: { wordsSpoken },
+    wordsToPractice,
   };
 }
 

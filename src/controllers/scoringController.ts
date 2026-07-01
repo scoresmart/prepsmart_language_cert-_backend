@@ -89,11 +89,16 @@ async function saveScoreToAttempt(
   scoreDetails: object,
   status: 'completed' | 'failed',
 ) {
-  await getSupabase()
+  const { error } = await getSupabase()
     .from('practice_attempts')
     .update({ score, total, score_details: scoreDetails, scoring_status: status })
     .eq('id', attemptId)
     .eq('student_id', studentId);
+
+  if (error) {
+    console.error('[Scoring] Failed to save score to attempt:', error.message);
+    throw new Error(`Could not save score to attempt: ${error.message}`);
+  }
 }
 
 // ─── POST /api/v1/scoring/writing ─────────────────────────────────────────────
