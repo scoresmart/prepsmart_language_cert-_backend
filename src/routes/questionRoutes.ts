@@ -18,6 +18,13 @@ import {
   uploadSpeakingAudio,
 } from '../controllers/questionController';
 import {
+  getSpeakingSets,
+  getSpeakingSetById,
+  createSpeakingSet,
+  updateSpeakingSet,
+  deleteSpeakingSet,
+} from '../controllers/speakingSetController';
+import {
   getReadingQuestions,
   getReadingQuestionById,
   createReadingQuestion,
@@ -51,7 +58,14 @@ router.post('/reading', authorize('tutor', 'admin'), createReadingQuestion);
 router.put('/reading/:id', authorize('tutor', 'admin'), updateReadingQuestion);
 router.delete('/reading/:id', authorize('admin'), deleteReadingQuestion);
 
-// Speaking questions
+// Speaking sets (full 4-part bundles) — register before /speaking/:id
+router.get('/speaking/sets', getSpeakingSets);
+router.get('/speaking/sets/:id', getSpeakingSetById);
+router.post('/speaking/sets', authorize('tutor', 'admin'), createSpeakingSet);
+router.put('/speaking/sets/:id', authorize('tutor', 'admin'), updateSpeakingSet);
+router.delete('/speaking/sets/:id', authorize('admin'), deleteSpeakingSet);
+
+// Speaking questions (legacy single prompts)
 router.get('/speaking', getSpeakingQuestions);
 router.post('/speaking/upload-audio', authorize('tutor', 'admin'), uploadSpeakingAudio);
 router.get('/speaking/:id', getSpeakingQuestionById);
