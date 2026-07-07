@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { randomUUID } from 'crypto';
+import { readFile, unlink } from 'fs/promises';
 import { getSupabase } from '../config/database';
 import { audioUpload } from './scoringController';
 import {
@@ -377,12 +378,19 @@ export async function deleteSpeakingQuestion(req: Request, res: Response, next: 
 // POST /api/v1/questions/speaking/upload-audio (multipart)
 export async function uploadSpeakingAudio(req: Request, res: Response, next: NextFunction) {
   audioUpload(req, res, async (uploadErr) => {
+    const tempPath = req.file?.path;
+
     try {
       if (uploadErr) {
         return res.status(400).json({ success: false, message: uploadErr.message });
       }
-      if (!req.file) {
+      if (!req.file || !tempPath) {
         return res.status(400).json({ success: false, message: 'No audio file provided' });
+      }
+
+      const audioBuffer = await readFile(tempPath);
+      if (audioBuffer.length === 0) {
+        return res.status(400).json({ success: false, message: 'Uploaded audio file is empty' });
       }
 
       const ext = speakingAudioExtension(req.file.mimetype, req.file.originalname);
@@ -393,7 +401,7 @@ export async function uploadSpeakingAudio(req: Request, res: Response, next: Nex
       const { error } = await getSupabase()
         .storage
         .from(SPEAKING_AUDIO_BUCKET)
-        .upload(path, req.file.buffer, {
+        .upload(path, audioBuffer, {
           contentType: req.file.mimetype,
           upsert: false,
         });
@@ -411,6 +419,10 @@ export async function uploadSpeakingAudio(req: Request, res: Response, next: Nex
       });
     } catch (error) {
       next(error);
+    } finally {
+      if (tempPath) {
+        unlink(tempPath).catch(() => {});
+      }
     }
   });
 }
