@@ -26,4 +26,9 @@ CREATE POLICY "Admins can manage speaking sets"
   ON public.speaking_sets FOR ALL
   USING (
     (SELECT role FROM public.profiles WHERE id = auth.uid()) IN ('admin'::app_role, 'tutor'::app_role)
+  )
+  WITH CHECK (
+    (SELECT role FROM public.profiles WHERE id = auth.uid()) IN ('admin'::app_role, 'tutor'::app_role)
   );
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.speaking_sets TO anon, authenticated, service_role;

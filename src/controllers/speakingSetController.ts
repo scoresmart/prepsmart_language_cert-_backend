@@ -1,38 +1,20 @@
 import { Request, Response, NextFunction } from 'express';
 import { getSupabase } from '../config/database';
 import {
-  emptySpeakingSetStructure,
+  normalizeSpeakingSetStructure,
   resolveSetStructureAudio,
   validateSpeakingSetStructure,
-  type SpeakingSetStructure,
 } from '../utils/speakingSetStructure';
 
-function normalizeStructure(raw: unknown): SpeakingSetStructure {
-  if (!raw || typeof raw !== 'object') return emptySpeakingSetStructure();
-  const s = raw as Partial<SpeakingSetStructure>;
-  const base = emptySpeakingSetStructure();
-  return {
-    part1: Array.isArray(s.part1) && s.part1.length === 5 ? s.part1 : base.part1,
-    part2: Array.isArray(s.part2) && s.part2.length === 2 ? s.part2 : base.part2,
-    part3: {
-      readAloud: { ...base.part3.readAloud, ...(s.part3?.readAloud ?? {}) },
-      followUps:
-        Array.isArray(s.part3?.followUps) && s.part3.followUps.length > 0
-          ? s.part3.followUps
-          : base.part3.followUps,
-    },
-    part4: {
-      presentation: { ...base.part4.presentation, ...(s.part4?.presentation ?? {}) },
-      followUps:
-        Array.isArray(s.part4?.followUps) && s.part4.followUps.length === 2
-          ? s.part4.followUps
-          : base.part4.followUps,
-    },
-  };
+function isMissingSpeakingSetsTable(error: { code?: string; message?: string } | null): boolean {
+  return (
+    error?.code === 'PGRST205' &&
+    (error.message?.includes('speaking_sets') ?? false)
+  );
 }
 
 function mapSetRow(row: Record<string, unknown>, resolveAudio: boolean) {
-  const structure = normalizeStructure(row.structure);
+  const structure = normalizeSpeakingSetStructure(row.structure);
   return {
     id: row.id,
     title: row.title,
@@ -61,7 +43,13 @@ export async function getSpeakingSets(req: Request, res: Response, next: NextFun
     if (!showAll) query = query.eq('is_published', true);
 
     const { data, error } = await query;
-    if (error) throw error;
+    if (error) {
+      // Migration not applied yet — fall back to legacy per-part speaking questions.
+      if (isMissingSpeakingSetsTable(error)) {
+        return res.json({ success: true, data: [] });
+      }
+      throw error;
+    }
 
     return res.json({
       success: true,
@@ -108,10 +96,13 @@ export async function createSpeakingSet(req: Request, res: Response, next: NextF
       return res.status(400).json({ success: false, message: 'title is required' });
     }
 
-    const normalized = normalizeStructure(structure);
-    const validationError = validateSpeakingSetStructure(normalized);
-    if (validationError) {
-      return res.status(400).json({ success: false, message: validationError });
+    const normalized = normalizeSpeakingSetStructure(structure);
+    const publishing = Boolean(is_published);
+    if (publishing) {
+      const validationError = validateSpeakingSetStructure(normalized);
+      if (validationError) {
+        return res.status(400).json({ success: false, message: validationError });
+      }
     }
 
     const { data, error } = await getSupabase()
@@ -120,7 +111,7 @@ export async function createSpeakingSet(req: Request, res: Response, next: NextF
         title: title.trim(),
         level,
         sort_order,
-        is_published: Boolean(is_published),
+        is_published: publishing,
         structure: normalized,
         created_by: req.user?.sub,
       })
@@ -146,12 +137,30 @@ export async function updateSpeakingSet(req: Request, res: Response, next: NextF
     if (is_published !== undefined) updates.is_published = Boolean(is_published);
 
     if (structure !== undefined) {
-      const normalized = normalizeStructure(structure);
-      const validationError = validateSpeakingSetStructure(normalized);
-      if (validationError) {
-        return res.status(400).json({ success: false, message: validationError });
+      const normalized = normalizeSpeakingSetStructure(structure);
+      if (is_published === true) {
+        const validationError = validateSpeakingSetStructure(normalized);
+        if (validationError) {
+          return res.status(400).json({ success: false, message: validationError });
+        }
       }
       updates.structure = normalized;
+    }
+
+    if (is_published === true && structure === undefined) {
+      const { data: existing } = await getSupabase()
+        .from('speaking_sets')
+        .select('structure')
+        .eq('id', req.params.id)
+        .single();
+      if (existing) {
+        const validationError = validateSpeakingSetStructure(
+          normalizeSpeakingSetStructure(existing.structure),
+        );
+        if (validationError) {
+          return res.status(400).json({ success: false, message: validationError });
+        }
+      }
     }
 
     const { data, error } = await getSupabase()
