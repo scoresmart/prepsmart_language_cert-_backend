@@ -74,21 +74,31 @@ function isAllowedOrigin(origin) {
 
 // ---------------------------------------------------------------- auth
 //
-// Off by default: the browser client opens the socket with no token, so
-// switching this on without shipping a token alongside it would lock every
-// candidate out. Turn it on once the frontend appends `?token=<supabase jwt>`.
+// On by default. An exam costs real money to run, so the socket is closed to
+// anyone without a valid Supabase session — the origin check alone only proves
+// the request came from our own page, not that a signed-in student sent it.
+//
+// The verifier is injected by index.ts rather than implemented here: it calls
+// the same `supabase.auth.getUser()` the REST middleware uses, so a token the
+// API accepts is a token the examiner accepts. This module stays free of
+// backend imports because it is shared verbatim with the frontend repo.
 
-const REQUIRE_AUTH = process.env.REALTIME_REQUIRE_AUTH === "true";
+const REQUIRE_AUTH = process.env.REALTIME_REQUIRE_AUTH !== "false";
 
-async function verifyToken(token) {
-  const secret = process.env.JWT_SECRET;
-  if (!secret || !token) return null;
-  try {
-    const { default: jwt } = await import("jsonwebtoken");
-    return jwt.verify(token, secret);
-  } catch {
-    return null;
-  }
+/** WebSocket close code for "you are not signed in" — surfaced to the browser. */
+const CLOSE_UNAUTHORIZED = 4401;
+
+/** Set by attachRealtimeBridge(). Returns a user object, or null to refuse. */
+let verifyToken = async () => null;
+
+function readToken(url, req) {
+  // Browsers cannot set headers on a WebSocket, so the token rides in the
+  // query string. Non-browser clients may use the header instead.
+  return (
+    url.searchParams.get("token") ||
+    (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "") ||
+    ""
+  );
 }
 
 // ---------------------------------------------------------------- mount
@@ -130,8 +140,19 @@ function reject(socket, statusLine, why) {
  * REST API to boot exactly as before. A missing key is a misconfiguration, not
  * a reason to take the whole backend down.
  */
-export function attachRealtimeBridge(server) {
+export function attachRealtimeBridge(server, options = {}) {
   const apiKey = readApiKey();
+
+  if (typeof options.verifyToken === "function") {
+    verifyToken = options.verifyToken;
+  } else if (REQUIRE_AUTH) {
+    // Refusing everything is the safe failure here: a bridge that silently let
+    // every socket through because its verifier went missing is worse than one
+    // that is plainly broken.
+    console.error(
+      "[realtime] auth is required but no verifier was supplied — every exam will be refused.",
+    );
+  }
 
   if (!apiKey) {
     console.warn(
@@ -187,24 +208,31 @@ export function attachRealtimeBridge(server) {
       return;
     }
 
-    const token =
-      url.searchParams.get("token") ||
-      (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
-
-    void verifyToken(token).then((user) => {
-      if (!user) {
-        reject(socket, "401 Unauthorized", "rejected upgrade with no valid token");
+    void verifyToken(readToken(url, req)).then((user) => {
+      if (user) {
+        finish(user);
         return;
       }
-      finish(user);
+
+      // Deliberately NOT an HTTP 401. A browser whose upgrade is refused sees
+      // only a generic failure with close code 1006 and no reason, so the
+      // candidate would be told "could not reach the examiner" when the real
+      // problem is an expired login. Completing the handshake and closing with
+      // a code the page can read turns that into an accurate message. No
+      // ExaminerSession is created, so nothing is billed.
+      console.warn("[realtime] refused a socket with no valid session");
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        ws.close(CLOSE_UNAUTHORIZED, "sign in again to start the exam");
+      });
     });
   });
 
   wss.on("connection", (ws) => {
     const session = new ExaminerSession(ws, apiKey);
     sessions.add(session);
+    const who = ws.user?.email ?? ws.user?.sub ?? "anonymous";
     console.log(
-      `[realtime] client connected — session ${session.sessionId} (${sessions.size} active)`,
+      `[realtime] client connected — session ${session.sessionId} for ${who} (${sessions.size} active)`,
     );
 
     // A client that connects and never starts an exam still holds a slot.

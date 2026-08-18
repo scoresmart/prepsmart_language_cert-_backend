@@ -21,7 +21,17 @@ const PORT = arg("port", process.env.PORT || 5000);
 // The examiner now shares the API server's port, so the default target is the
 // local backend. Pass --url to point at Railway:
 //   node scripts/test-realtime-client.mjs --url wss://<service>.up.railway.app/realtime/speaking
-const TARGET = arg("url", `ws://localhost:${PORT}/realtime/speaking`);
+const BASE = arg("url", `ws://localhost:${PORT}/realtime/speaking`);
+
+// The socket requires a Supabase session unless REALTIME_REQUIRE_AUTH=false.
+// Grab a student's access token from the browser (Application > Local Storage
+// > sb-*-auth-token) and pass it here:
+//   npm run realtime:test -- --token eyJhbGci...
+const TOKEN = arg("token", process.env.REALTIME_TEST_TOKEN || "");
+
+const TARGET = TOKEN
+  ? `${BASE}${BASE.includes("?") ? "&" : "?"}token=${encodeURIComponent(TOKEN)}`
+  : BASE;
 const RUN_SECONDS = Number(arg("seconds", 120));
 const MODE = arg("mode", "silent");
 
@@ -83,6 +93,15 @@ async function synthesise(text) {
 }
 
 const ws = new WebSocket(TARGET);
+
+ws.on("close", (code, reason) => {
+  if (code !== 4401) return;
+  console.error(
+    `\n[test] refused: ${reason || "no valid session"}.\n` +
+      "[test] pass --token <supabase access token>, or set REALTIME_REQUIRE_AUTH=false\n" +
+      "[test] on the server you are testing against.\n",
+  );
+});
 
 const CHUNK = 2 * 480; // 20 ms of PCM16 @ 24 kHz
 const SILENCE = Buffer.alloc(CHUNK);

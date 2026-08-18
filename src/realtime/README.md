@@ -76,10 +76,23 @@ same `CORS_ORIGIN` / `CORS_ALLOW_VERCEL` / `CORS_ALLOW_RAILWAY` /
 API may also open an exam. `REALTIME_ALLOWED_ORIGINS` overrides that list for
 the WebSocket alone.
 
-`REALTIME_REQUIRE_AUTH=true` additionally demands a valid Supabase JWT as
-`?token=…`. It is **off by default** because the current browser client opens
-the socket without one — turning it on before the frontend sends a token locks
-every candidate out.
+On top of that, the socket requires a **valid Supabase session**, on by
+default. The origin check only proves the request came from our own page; it
+says nothing about who sent it, and an exam costs real money to run.
+
+The browser cannot set headers on a WebSocket, so the frontend appends the
+access token as `?token=…` (safe over `wss://`, where the URL travels inside
+the encrypted tunnel). The backend verifies it with the same
+`supabase.auth.getUser()` call the REST middleware uses — so a token the API
+accepts is a token the examiner accepts, and it keeps working when Supabase
+rotates its signing keys. `REALTIME_REQUIRE_AUTH=false` disables the check.
+
+A refused socket is **not** an HTTP 401. A browser whose upgrade fails sees only
+close code 1006 with no reason, so an expired login would reach the candidate as
+"could not reach the examiner". Instead the handshake completes and the socket
+is immediately closed with **4401** and a reason the page can read — no
+`ExaminerSession` is created, so nothing is billed. The client turns that into
+*"Your session has expired. Please sign in again."*
 
 ## How a test runs
 
@@ -142,8 +155,10 @@ them, or set it to `off` to skip disk writes entirely.
 ## Smoke test (no browser, no mic)
 
 ```bash
-npm run realtime:test -- --mode answer    # synthesised candidate answers
-npm run realtime:test -- --mode silent    # dead air -> nudge -> skip -> abandon
+# the socket needs a real session — copy a students access token from the
+# browser (Application > Local Storage > sb-*-auth-token)
+npm run realtime:test -- --token eyJhbGci... --mode answer   # synthesised answers
+npm run realtime:test -- --token eyJhbGci... --mode silent   # dead air -> nudge -> skip
 
 # against the deployed service
 npm run realtime:test -- --url wss://<your-service>.up.railway.app/realtime/speaking
@@ -164,12 +179,11 @@ All optional; defaults live in `examinerSession.mjs`.
 | `REALTIME_MAX_EXAM_MS` | `1200000` | 20-minute ceiling |
 | `REALTIME_MAX_CONCURRENT` | `4` | Concurrent exams on this instance |
 | `REALTIME_SESSION_DIR` | `.realtime-sessions` | Transcript directory, or `off` |
-| `REALTIME_REQUIRE_AUTH` | off | Require a Supabase JWT on the socket |
+| `REALTIME_REQUIRE_AUTH` | on | Require a valid Supabase session on the socket |
 | `REALTIME_DEBUG` | off | Log every script decision |
 
 ## Still worth doing
 
 - Write transcripts to Supabase instead of the container filesystem.
-- Per-user rate limiting and a daily spend cap — right now any allowed origin
-  can open exams up to the concurrency limit.
-- Turn `REALTIME_REQUIRE_AUTH` on once the frontend appends the Supabase token.
+- Per-user rate limiting and a daily spend cap — a signed-in student can still
+  open exams up to the concurrency limit.

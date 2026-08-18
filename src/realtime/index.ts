@@ -13,6 +13,35 @@
 import type { Server } from 'http';
 import path from 'path';
 import { pathToFileURL } from 'url';
+import { getSupabase } from '../config/database';
+
+export interface RealtimeUser {
+  sub: string;
+  email?: string;
+}
+
+/**
+ * Verify a candidate's Supabase session for the exam socket.
+ *
+ * Deliberately the same check as the `authenticate` middleware — getUser()
+ * validates the signature and the expiry against Supabase — so a token the
+ * REST API accepts is a token the examiner accepts, and a student who can load
+ * the speaking page can always start the test. Verifying a JWT locally against
+ * JWT_SECRET would drift from that the moment Supabase rotates its keys.
+ */
+async function verifySupabaseToken(token: string): Promise<RealtimeUser | null> {
+  if (!token) return null;
+  try {
+    const { data, error } = await getSupabase().auth.getUser(token);
+    if (error || !data.user) return null;
+    return { sub: data.user.id, email: data.user.email };
+  } catch (error) {
+    // A Supabase outage must not read as "this candidate is an impostor", but
+    // it cannot open the gate either. Refuse, and say why in the log.
+    console.error('[realtime] could not verify a session token:', error);
+    return null;
+  }
+}
 
 export interface RealtimeStatus {
   enabled: boolean;
@@ -26,9 +55,13 @@ export interface RealtimeStatus {
   reason?: string;
 }
 
+interface RealtimeBridgeOptions {
+  verifyToken(token: string): Promise<RealtimeUser | null>;
+}
+
 interface RealtimeBridgeModule {
   REALTIME_PATH: string;
-  attachRealtimeBridge(server: Server): boolean;
+  attachRealtimeBridge(server: Server, options: RealtimeBridgeOptions): boolean;
   shutdownRealtimeBridge(reason?: string): Promise<void>;
   realtimeStatus(): RealtimeStatus;
 }
@@ -55,7 +88,7 @@ export async function attachRealtime(server: Server): Promise<boolean> {
     // build — the .mjs files sit beside this module in both.
     const entry = pathToFileURL(path.join(__dirname, 'bridge.mjs')).href;
     bridge = (await importEsm(entry)) as RealtimeBridgeModule;
-    return bridge.attachRealtimeBridge(server);
+    return bridge.attachRealtimeBridge(server, { verifyToken: verifySupabaseToken });
   } catch (error) {
     loadError = error instanceof Error ? error.message : String(error);
     console.error('[realtime] failed to mount the speaking examiner:', loadError);
