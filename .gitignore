@@ -27,3 +27,6 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# Realtime examiner transcripts (local runs; ephemeral on Railway)
+.realtime-sessions/

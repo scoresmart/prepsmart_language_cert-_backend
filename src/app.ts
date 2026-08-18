@@ -24,6 +24,8 @@ import templateRoutes from './routes/templateRoutes';
 import practiceRoutes from './routes/practiceRoutes';
 import scoringRoutes from './routes/scoringRoutes';
 
+import { realtimeStatus } from './realtime';
+
 const app = express();
 
 // Security middleware
@@ -49,6 +51,13 @@ if (env.NODE_ENV !== 'test') {
 // Health check
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'prepsmart-language-cert-api', timestamp: new Date().toISOString() });
+});
+
+// Live speaking examiner. The exam itself runs over a WebSocket on
+// /realtime/speaking (mounted in server.ts); this route just reports whether
+// that endpoint is up, so the frontend and Railway can check it over plain HTTP.
+app.get('/realtime/health', (_req, res) => {
+  res.json({ status: 'ok', realtime: realtimeStatus(), timestamp: new Date().toISOString() });
 });
 
 // API routes

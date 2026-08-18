@@ -5,14 +5,15 @@
     "main": "dist/server.js",
     "scripts": {
         "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
-        "build": "tsc",
+        "build": "tsc && node scripts/copy-realtime.mjs",
         "start": "node dist/server.js",
         "lint": "eslint src/**/*.ts",
         "db:migrate": "ts-node src/config/migrations.ts",
         "ensure-admin": "node scripts/ensure-admin-user.mjs",
         "ensure-speaking-test": "node scripts/ensure-speaking-test-question.mjs",
         "ensure-writing": "node scripts/ensure-writing-questions.mjs",
-        "mcp": "ts-node src/mcp/server.ts"
+        "mcp": "ts-node src/mcp/server.ts",
+        "realtime:test": "node scripts/test-realtime-client.mjs"
     },
     "dependencies": {
         "@anthropic-ai/sdk": "^0.104.2",
