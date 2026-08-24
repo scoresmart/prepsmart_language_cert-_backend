@@ -5,6 +5,28 @@ import {
   resolveSetStructureAudio,
   validateSpeakingSetStructure,
 } from '../utils/speakingSetStructure';
+import {
+  isSpeakingExamStructure,
+  validateSpeakingExamStructure,
+} from '../utils/speakingExamStructure';
+
+/**
+ * Sets come in two shapes: the v2 model of pre-recorded prompts, and the v3
+ * script the live examiner performs. Only v2 may be normalized — the v3 script
+ * has no server-side model, so it is stored exactly as the editor sent it.
+ * Normalizing it rewrites it into the read-aloud shape and silently discards
+ * the picture, the topic and the situations the admin typed.
+ */
+function prepareStructure(structure: unknown): {
+  stored: unknown;
+  validate: () => string | null;
+} {
+  if (isSpeakingExamStructure(structure)) {
+    return { stored: structure, validate: () => validateSpeakingExamStructure(structure) };
+  }
+  const normalized = normalizeSpeakingSetStructure(structure);
+  return { stored: normalized, validate: () => validateSpeakingSetStructure(normalized) };
+}
 
 function isMissingSpeakingSetsTable(error: { code?: string; message?: string } | null): boolean {
   return (
@@ -14,6 +36,21 @@ function isMissingSpeakingSetsTable(error: { code?: string; message?: string } |
 }
 
 function mapSetRow(row: Record<string, unknown>, resolveAudio: boolean) {
+  // A v3 script row has no per-prompt audio to resolve — the examiner speaks it
+  // live — and normalizing it would rewrite it into the v2 shape on the way out.
+  if (isSpeakingExamStructure(row.structure)) {
+    return {
+      id: row.id,
+      title: row.title,
+      level: row.level,
+      sort_order: row.sort_order,
+      is_published: row.is_published,
+      structure: row.structure,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  }
+
   const structure = normalizeSpeakingSetStructure(row.structure);
   return {
     id: row.id,
@@ -96,10 +133,10 @@ export async function createSpeakingSet(req: Request, res: Response, next: NextF
       return res.status(400).json({ success: false, message: 'title is required' });
     }
 
-    const normalized = normalizeSpeakingSetStructure(structure);
+    const prepared = prepareStructure(structure);
     const publishing = Boolean(is_published);
     if (publishing) {
-      const validationError = validateSpeakingSetStructure(normalized);
+      const validationError = prepared.validate();
       if (validationError) {
         return res.status(400).json({ success: false, message: validationError });
       }
@@ -112,7 +149,7 @@ export async function createSpeakingSet(req: Request, res: Response, next: NextF
         level,
         sort_order,
         is_published: publishing,
-        structure: normalized,
+        structure: prepared.stored,
         created_by: req.user?.sub,
       })
       .select('id, title, level, sort_order, is_published, structure, created_at, updated_at')
@@ -137,16 +174,17 @@ export async function updateSpeakingSet(req: Request, res: Response, next: NextF
     if (is_published !== undefined) updates.is_published = Boolean(is_published);
 
     if (structure !== undefined) {
-      const normalized = normalizeSpeakingSetStructure(structure);
+      const prepared = prepareStructure(structure);
       if (is_published === true) {
-        const validationError = validateSpeakingSetStructure(normalized);
+        const validationError = prepared.validate();
         if (validationError) {
           return res.status(400).json({ success: false, message: validationError });
         }
       }
-      updates.structure = normalized;
+      updates.structure = prepared.stored;
     }
 
+    // Publishing from the list toggle sends no structure, so check the stored one.
     if (is_published === true && structure === undefined) {
       const { data: existing } = await getSupabase()
         .from('speaking_sets')
@@ -154,9 +192,7 @@ export async function updateSpeakingSet(req: Request, res: Response, next: NextF
         .eq('id', req.params.id)
         .single();
       if (existing) {
-        const validationError = validateSpeakingSetStructure(
-          normalizeSpeakingSetStructure(existing.structure),
-        );
+        const validationError = prepareStructure(existing.structure).validate();
         if (validationError) {
           return res.status(400).json({ success: false, message: validationError });
         }
