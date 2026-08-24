@@ -83,11 +83,27 @@ export type SpeakingSetPart4 = {
   ending: SpeakingTextAudio;
 };
 
+/**
+ * A v2 set is authored one of two ways. `academic_parts` is the original
+ * four-part exam. `question_set_15` is a flat list of fifteen questions with
+ * per-question audio; it leaves part1–part4 sitting at their empty defaults on
+ * purpose, because the admin is never asked to fill them in.
+ *
+ * The mode has to be honoured here as well as in the admin UI — validating a
+ * question set against the four-part rules rejects it with
+ * "Part 1 Question 1 text is required." for parts that are empty by design.
+ */
+export type SpeakingSetMode = 'academic_parts' | 'question_set_15';
+
+export const SPEAKING_QUESTION_SET_SIZE = 15;
+
 export type SpeakingSetStructure = {
   version: 2;
+  mode: SpeakingSetMode;
   exam_name: string;
   disclaimer: string;
   general_intro: SpeakingTextAudio;
+  question_set_questions: SpeakingTimedPrompt[];
   part1: SpeakingSetPart1;
   part2: SpeakingSetPart2;
   part3: SpeakingSetPart3;
@@ -176,9 +192,15 @@ export function emptySpeakingSetStructure(): SpeakingSetStructure {
   const t = SPEAKING_SET_DEFAULTS.timers;
   return {
     version: 2,
+    // Anything stored before the question-set mode existed is a four-part set,
+    // so an absent `mode` must keep meaning `academic_parts`.
+    mode: 'academic_parts',
     exam_name: SPEAKING_SET_EXAM_NAME,
     disclaimer: SPEAKING_SET_DEFAULTS.disclaimer,
     general_intro: textAudio(SPEAKING_SET_DEFAULTS.generalIntroText),
+    question_set_questions: Array.from({ length: SPEAKING_QUESTION_SET_SIZE }, () =>
+      timedPrompt('', t.part1Answer),
+    ),
     part1: {
       student_instruction: SPEAKING_SET_DEFAULTS.part1StudentInstruction,
       examiner_instruction: textAudio(SPEAKING_SET_DEFAULTS.part1ExaminerInstruction),
@@ -235,12 +257,17 @@ export function normalizeSpeakingSetStructure(raw: unknown): SpeakingSetStructur
 
     return {
       version: 2,
+      mode: s.mode === 'question_set_15' ? 'question_set_15' : 'academic_parts',
       exam_name: typeof s.exam_name === 'string' && s.exam_name.trim() ? s.exam_name : base.exam_name,
       disclaimer: typeof s.disclaimer === 'string' && s.disclaimer.trim() ? s.disclaimer : base.disclaimer,
       general_intro: {
         text: general.text?.trim() || base.general_intro.text,
         audio_url: general.audio_url ?? null,
       },
+      question_set_questions: coerceTimedPrompts(
+        pickArray(s, ['question_set_questions', 'questionSetQuestions']),
+        base.question_set_questions,
+      ),
       part1: {
         student_instruction: p1.student_instruction?.trim() || base.part1.student_instruction,
         examiner_instruction: coerceTextAudio(p1.examiner_instruction, base.part1.examiner_instruction.text),
@@ -334,6 +361,20 @@ export function validateSpeakingSetStructure(structure: SpeakingSetStructure): s
 
   const blank = (value: string | null | undefined) => !(value ?? '').trim();
 
+  // A question set has no parts to check — only its fifteen questions. Running
+  // it through the four-part rules below fails on parts that are empty by
+  // design, which is the whole reason this branch exists.
+  if (s.mode === 'question_set_15') {
+    const questions = s.question_set_questions ?? [];
+    if (questions.length !== SPEAKING_QUESTION_SET_SIZE) {
+      return `Question set must contain exactly ${SPEAKING_QUESTION_SET_SIZE} questions.`;
+    }
+    for (const [i, q] of questions.entries()) {
+      if (blank(q.text)) return `Question ${i + 1} text is required.`;
+    }
+    return null;
+  }
+
   for (const [i, q] of s.part1.questions.entries()) {
     if (blank(q.text)) return `Part 1 Question ${i + 1} text is required.`;
   }
@@ -368,6 +409,7 @@ export function resolveSetStructureAudio(structure: SpeakingSetStructure): Speak
   return {
     ...s,
     general_intro: resolveTA(s.general_intro, 1),
+    question_set_questions: s.question_set_questions.map((q, i) => resolveTP(q, 60 + i)),
     part1: {
       ...s.part1,
       examiner_instruction: resolveTA(s.part1.examiner_instruction, 10),
