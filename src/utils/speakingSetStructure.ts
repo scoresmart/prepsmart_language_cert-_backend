@@ -102,6 +102,76 @@ function timedPrompt(text = '', timer_seconds: number, audio_url: string | null 
   return { text, audio_url, timer_seconds };
 }
 
+/** First non-empty string found under any of `keys`. */
+function pickString(source: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  return null;
+}
+
+/** First array found under any of `keys`. */
+function pickArray(source: Record<string, unknown>, keys: string[]): unknown[] | null {
+  for (const key of keys) {
+    const value = source[key];
+    if (Array.isArray(value)) return value;
+  }
+  return null;
+}
+
+const TEXT_KEYS = ['text', 'question', 'content', 'prompt', 'situation', 'topic', 'value', 'label', 'title'];
+
+/**
+ * Pull the prompt text out of whatever the admin UI sent — a bare string, or an
+ * object keyed by text/question/content/prompt/… Returns '' when nothing usable
+ * is present, so an unexpected shape degrades to "this one field is empty"
+ * rather than blanking the whole part.
+ */
+function coerceText(raw: unknown): string {
+  if (typeof raw === 'string') return raw;
+  if (raw && typeof raw === 'object') return pickString(raw as Record<string, unknown>, TEXT_KEYS) ?? '';
+  return '';
+}
+
+function coerceAudioUrl(raw: unknown): string | null {
+  if (!raw || typeof raw !== 'object') return null;
+  return pickString(raw as Record<string, unknown>, ['audio_url', 'audioUrl', 'audio']);
+}
+
+function coerceTimer(raw: unknown, fallback: number): number {
+  if (!raw || typeof raw !== 'object') return fallback;
+  const src = raw as Record<string, unknown>;
+  const n = Number(src.timer_seconds ?? src.timerSeconds ?? src.timer ?? src.seconds);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function coerceTextAudio(raw: unknown, fallbackText: string): SpeakingTextAudio {
+  return {
+    text: coerceText(raw).trim() || fallbackText,
+    audio_url: coerceAudioUrl(raw),
+  };
+}
+
+/**
+ * Map an incoming prompt list onto the fixed slot count a part expects. Extra
+ * items are dropped and missing slots padded from `defaults`, but whatever the
+ * admin actually typed is always kept — a length or shape mismatch must never
+ * silently wipe the part and then be reported as "Question 1 text is required".
+ */
+function coerceTimedPrompts(raw: unknown, defaults: SpeakingTimedPrompt[]): SpeakingTimedPrompt[] {
+  const items = Array.isArray(raw) ? raw : [];
+  return defaults.map((fallback, i) => {
+    const item = items[i];
+    if (item === undefined || item === null) return { ...fallback };
+    return {
+      text: coerceText(item),
+      audio_url: coerceAudioUrl(item),
+      timer_seconds: coerceTimer(item, fallback.timer_seconds),
+    };
+  });
+}
+
 export function emptySpeakingSetStructure(): SpeakingSetStructure {
   const t = SPEAKING_SET_DEFAULTS.timers;
   return {
@@ -147,12 +217,21 @@ export function normalizeSpeakingSetStructure(raw: unknown): SpeakingSetStructur
   if (!raw || typeof raw !== 'object') return base;
   const s = raw as Record<string, unknown>;
 
-  if (s.version === 2 || (s.part1 && typeof s.part1 === 'object' && 'questions' in (s.part1 as object))) {
-    const p1 = (s.part1 ?? {}) as Partial<SpeakingSetPart1>;
-    const p2 = (s.part2 ?? {}) as Partial<SpeakingSetPart2>;
-    const p3 = (s.part3 ?? {}) as Partial<SpeakingSetPart3>;
-    const p4 = (s.part4 ?? {}) as Partial<SpeakingSetPart4>;
+  // v2 keeps each part as an object; the legacy shape used arrays for part1/part2.
+  const isV2 =
+    s.version === 2 ||
+    (!!s.part1 && typeof s.part1 === 'object' && !Array.isArray(s.part1)) ||
+    (!!s.part3 && typeof s.part3 === 'object' && 'read_aloud_text' in (s.part3 as object));
+
+  if (isV2) {
+    const p1 = (s.part1 ?? {}) as Record<string, unknown> & Partial<SpeakingSetPart1>;
+    const p2 = (s.part2 ?? {}) as Record<string, unknown> & Partial<SpeakingSetPart2>;
+    const p3 = (s.part3 ?? {}) as Record<string, unknown> & Partial<SpeakingSetPart3>;
+    const p4 = (s.part4 ?? {}) as Record<string, unknown> & Partial<SpeakingSetPart4>;
     const general = (s.general_intro ?? {}) as Partial<SpeakingTextAudio>;
+
+    const p3FollowUpRaw =
+      pickArray(p3, ['follow_ups', 'followUps'])?.[0] ?? p3.follow_up ?? (p3 as Record<string, unknown>).followUp;
 
     return {
       version: 2,
@@ -164,89 +243,43 @@ export function normalizeSpeakingSetStructure(raw: unknown): SpeakingSetStructur
       },
       part1: {
         student_instruction: p1.student_instruction?.trim() || base.part1.student_instruction,
-        examiner_instruction: {
-          text: p1.examiner_instruction?.text?.trim() || base.part1.examiner_instruction.text,
-          audio_url: p1.examiner_instruction?.audio_url ?? null,
-        },
-        questions:
-          Array.isArray(p1.questions) && p1.questions.length === 5
-            ? p1.questions.map((q, i) => ({
-                text: q?.text ?? '',
-                audio_url: q?.audio_url ?? null,
-                timer_seconds: Number(q?.timer_seconds) > 0 ? Number(q.timer_seconds) : base.part1.questions[i].timer_seconds,
-              }))
-            : base.part1.questions,
+        examiner_instruction: coerceTextAudio(p1.examiner_instruction, base.part1.examiner_instruction.text),
+        questions: coerceTimedPrompts(
+          pickArray(p1, ['questions', 'items', 'prompts']),
+          base.part1.questions,
+        ),
       },
       part2: {
         student_instruction: p2.student_instruction?.trim() || base.part2.student_instruction,
-        examiner_instruction: {
-          text: p2.examiner_instruction?.text?.trim() || base.part2.examiner_instruction.text,
-          audio_url: p2.examiner_instruction?.audio_url ?? null,
-        },
-        role_plays:
-          Array.isArray(p2.role_plays) && p2.role_plays.length === 2
-            ? p2.role_plays.map((q, i) => ({
-                text: q?.text ?? '',
-                audio_url: q?.audio_url ?? null,
-                timer_seconds: Number(q?.timer_seconds) > 0 ? Number(q.timer_seconds) : base.part2.role_plays[i].timer_seconds,
-              }))
-            : base.part2.role_plays,
+        examiner_instruction: coerceTextAudio(p2.examiner_instruction, base.part2.examiner_instruction.text),
+        role_plays: coerceTimedPrompts(
+          pickArray(p2, ['role_plays', 'rolePlays', 'roleplays', 'situations', 'items']),
+          base.part2.role_plays,
+        ),
       },
       part3: {
         student_instruction: p3.student_instruction?.trim() || base.part3.student_instruction,
-        examiner_instruction: {
-          text: p3.examiner_instruction?.text?.trim() || base.part3.examiner_instruction.text,
-          audio_url: p3.examiner_instruction?.audio_url ?? null,
-        },
-        read_aloud_text: p3.read_aloud_text ?? '',
+        examiner_instruction: coerceTextAudio(p3.examiner_instruction, base.part3.examiner_instruction.text),
+        read_aloud_text:
+          pickString(p3, ['read_aloud_text', 'readAloudText', 'read_text', 'readText', 'passage']) ?? '',
         preparation_timer: Number(p3.preparation_timer) > 0 ? Number(p3.preparation_timer) : base.part3.preparation_timer,
-        read_aloud_start: {
-          text: p3.read_aloud_start?.text?.trim() || base.part3.read_aloud_start.text,
-          audio_url: p3.read_aloud_start?.audio_url ?? null,
-        },
+        read_aloud_start: coerceTextAudio(p3.read_aloud_start, base.part3.read_aloud_start.text),
         reading_timer: Number(p3.reading_timer) > 0 ? Number(p3.reading_timer) : base.part3.reading_timer,
-        follow_up: {
-          text: p3.follow_up?.text ?? '',
-          audio_url: p3.follow_up?.audio_url ?? null,
-          timer_seconds:
-            Number(p3.follow_up?.timer_seconds) > 0
-              ? Number(p3.follow_up?.timer_seconds)
-              : base.part3.follow_up.timer_seconds,
-        },
+        follow_up: coerceTimedPrompts([p3FollowUpRaw], [base.part3.follow_up])[0],
       },
       part4: {
         student_instruction: p4.student_instruction?.trim() || base.part4.student_instruction,
-        examiner_instruction: {
-          text: p4.examiner_instruction?.text?.trim() || base.part4.examiner_instruction.text,
-          audio_url: p4.examiner_instruction?.audio_url ?? null,
-        },
-        presentation_topic: {
-          text: p4.presentation_topic?.text ?? '',
-          audio_url: p4.presentation_topic?.audio_url ?? null,
-        },
-        preparation_start: {
-          text: p4.preparation_start?.text?.trim() || base.part4.preparation_start.text,
-          audio_url: p4.preparation_start?.audio_url ?? null,
-        },
+        examiner_instruction: coerceTextAudio(p4.examiner_instruction, base.part4.examiner_instruction.text),
+        presentation_topic: coerceTextAudio(p4.presentation_topic ?? p4.presentationTopic ?? p4.topic, ''),
+        preparation_start: coerceTextAudio(p4.preparation_start, base.part4.preparation_start.text),
         preparation_timer: Number(p4.preparation_timer) > 0 ? Number(p4.preparation_timer) : base.part4.preparation_timer,
-        presentation_start: {
-          text: p4.presentation_start?.text?.trim() || base.part4.presentation_start.text,
-          audio_url: p4.presentation_start?.audio_url ?? null,
-        },
+        presentation_start: coerceTextAudio(p4.presentation_start, base.part4.presentation_start.text),
         speaking_timer: Number(p4.speaking_timer) > 0 ? Number(p4.speaking_timer) : base.part4.speaking_timer,
-        follow_ups:
-          Array.isArray(p4.follow_ups) && p4.follow_ups.length === 2
-            ? p4.follow_ups.map((q, i) => ({
-                text: q?.text ?? '',
-                audio_url: q?.audio_url ?? null,
-                timer_seconds:
-                  Number(q?.timer_seconds) > 0 ? Number(q.timer_seconds) : base.part4.follow_ups[i].timer_seconds,
-              }))
-            : base.part4.follow_ups,
-        ending: {
-          text: p4.ending?.text?.trim() || base.part4.ending.text,
-          audio_url: p4.ending?.audio_url ?? null,
-        },
+        follow_ups: coerceTimedPrompts(
+          pickArray(p4, ['follow_ups', 'followUps', 'followups', 'questions']),
+          base.part4.follow_ups,
+        ),
+        ending: coerceTextAudio(p4.ending, base.part4.ending.text),
       },
     };
   }
@@ -264,15 +297,11 @@ export function normalizeSpeakingSetStructure(raw: unknown): SpeakingSetStructur
     };
   };
 
-  if (Array.isArray(legacy.part1) && legacy.part1.length === 5) {
-    base.part1.questions = legacy.part1.map((q) =>
-      timedPrompt(q.content?.trim() || q.title || '', SPEAKING_SET_DEFAULTS.timers.part1Answer, q.audio_url ?? null),
-    );
+  if (Array.isArray(legacy.part1) && legacy.part1.length) {
+    base.part1.questions = coerceTimedPrompts(legacy.part1, base.part1.questions);
   }
-  if (Array.isArray(legacy.part2) && legacy.part2.length === 2) {
-    base.part2.role_plays = legacy.part2.map((q) =>
-      timedPrompt(q.content?.trim() || q.title || '', SPEAKING_SET_DEFAULTS.timers.part2RolePlay, q.audio_url ?? null),
-    );
+  if (Array.isArray(legacy.part2) && legacy.part2.length) {
+    base.part2.role_plays = coerceTimedPrompts(legacy.part2, base.part2.role_plays);
   }
   if (legacy.part3?.readAloud) {
     base.part3.read_aloud_text = legacy.part3.readAloud.read_text ?? '';
@@ -293,10 +322,8 @@ export function normalizeSpeakingSetStructure(raw: unknown): SpeakingSetStructur
       audio_url: legacy.part4.presentation.audio_url ?? null,
     };
   }
-  if (legacy.part4?.followUps?.length === 2) {
-    base.part4.follow_ups = legacy.part4.followUps.map((f) =>
-      timedPrompt(f.content?.trim() || f.title || '', SPEAKING_SET_DEFAULTS.timers.part4FollowUp, f.audio_url ?? null),
-    );
+  if (legacy.part4?.followUps?.length) {
+    base.part4.follow_ups = coerceTimedPrompts(legacy.part4.followUps, base.part4.follow_ups);
   }
 
   return base;
@@ -305,17 +332,19 @@ export function normalizeSpeakingSetStructure(raw: unknown): SpeakingSetStructur
 export function validateSpeakingSetStructure(structure: SpeakingSetStructure): string | null {
   const s = normalizeSpeakingSetStructure(structure);
 
+  const blank = (value: string | null | undefined) => !(value ?? '').trim();
+
   for (const [i, q] of s.part1.questions.entries()) {
-    if (!q.text.trim()) return `Part 1 Question ${i + 1} text is required.`;
+    if (blank(q.text)) return `Part 1 Question ${i + 1} text is required.`;
   }
   for (const [i, q] of s.part2.role_plays.entries()) {
-    if (!q.text.trim()) return `Part 2 Role Play ${i + 1} situation text is required.`;
+    if (blank(q.text)) return `Part 2 Role Play ${i + 1} situation text is required.`;
   }
-  if (!s.part3.read_aloud_text.trim()) return 'Part 3 read aloud text is required.';
-  if (!s.part3.follow_up.text.trim()) return 'Part 3 follow-up question is required.';
-  if (!s.part4.presentation_topic.text.trim()) return 'Part 4 presentation topic is required.';
+  if (blank(s.part3.read_aloud_text)) return 'Part 3 read aloud text is required.';
+  if (blank(s.part3.follow_up.text)) return 'Part 3 follow-up question is required.';
+  if (blank(s.part4.presentation_topic.text)) return 'Part 4 presentation topic is required.';
   for (const [i, q] of s.part4.follow_ups.entries()) {
-    if (!q.text.trim()) return `Part 4 Follow-up ${i + 1} text is required.`;
+    if (blank(q.text)) return `Part 4 Follow-up ${i + 1} text is required.`;
   }
   return null;
 }
