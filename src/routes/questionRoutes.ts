@@ -25,6 +25,10 @@ import {
   deleteSpeakingSet,
 } from '../controllers/speakingSetController';
 import {
+  startSpeakingSetGeneration,
+  getSpeakingSetGeneration,
+} from '../controllers/speakingSetAgentController';
+import {
   getReadingQuestions,
   getReadingQuestionById,
   createReadingQuestion,
@@ -59,6 +63,9 @@ router.put('/reading/:id', authorize('tutor', 'admin'), updateReadingQuestion);
 router.delete('/reading/:id', authorize('admin'), deleteReadingQuestion);
 
 // Speaking sets (full 4-part bundles) — register before /speaking/:id
+// AI generation — register before /speaking/sets/:id
+router.post('/speaking/sets/generate', authorize('admin'), startSpeakingSetGeneration);
+router.get('/speaking/sets/generate/:jobId', authorize('admin'), getSpeakingSetGeneration);
 router.get('/speaking/sets', getSpeakingSets);
 router.get('/speaking/sets/:id', getSpeakingSetById);
 router.post('/speaking/sets', authorize('tutor', 'admin'), createSpeakingSet);
