@@ -15,6 +15,8 @@ import {
   buildExaminerInstructions,
   clarifyDirective,
   closingDirective,
+  correctionAckDirective,
+  correctionCue,
   converseContinueDirective,
   converseDirective,
   generatedDirective,
@@ -111,7 +113,7 @@ const TOOLS = [
     type: "function",
     name: "remember_candidate_detail",
     description:
-      "Record something the candidate has just told you about themselves so you still know it later in the test — their name, where they are from, their job or studies, their family, an interest. Only for things they actually said out loud.",
+      "Record something the candidate has just told you about themselves so you still know it later in the test — their name, where they are from, their job or studies, their family, an interest. Only for things they actually said out loud. When the candidate tells you that you have a detail wrong (for example 'my name is not Robby, it's Ravi'), call this with the corrected value and correction set to true.",
     parameters: {
       type: "object",
       properties: {
@@ -123,6 +125,11 @@ const TOOLS = [
         value: {
           type: "string",
           description: "The detail exactly as the candidate gave it, e.g. 'Maria' or 'Lahore'.",
+        },
+        correction: {
+          type: "boolean",
+          description:
+            "True when the candidate is correcting a detail you had wrong. The new value replaces the old one.",
         },
       },
       required: ["detail", "value"],
@@ -245,6 +252,98 @@ export function extractProfile(question, answer) {
   return found;
 }
 
+/** Words that say "you got that wrong". */
+const CORRECTION_MARKERS =
+  /\b(?:no|nope|not|isn't|isnt|wasn't|wrong|incorrect|actually|mistake|misheard|misunderstood|correct|sorry)\b/i;
+const NOT_A_NAME_WORD =
+  /^(?:from|in|at|a|an|the|not|no|very|really|fine|good|great|well|okay|ok|sorry|here|ready|going|doing|working|living|studying|nervous|happy|glad|wrong|correct|right|actually|just|called|my|name|it|is|and|but)$/i;
+
+/** "Ravi Kumar and I" -> "Ravi Kumar": leading capitalised words only, as transcription writes names. */
+function nameFrom(raw) {
+  const words = String(raw ?? "")
+    .replace(/[^A-Za-z'’\s-]/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const kept = [];
+  for (const w of words) {
+    if (!/^[A-Z]/.test(w) || NOT_A_NAME_WORD.test(w)) break;
+    kept.push(w);
+    if (kept.length === 3) break;
+  }
+  return kept.length ? clean(kept.join(" ")) : null;
+}
+
+function lastCapture(text, re) {
+  let found = null;
+  for (const m of text.matchAll(re)) found = m[1];
+  return found;
+}
+
+const firstWord = (s) => String(s ?? "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * The candidate telling the examiner it got their name or home town wrong.
+ *
+ * Speech recognition mishears names, and a candidate who is called the wrong
+ * name for the rest of the test — and in every test after it — has no way to
+ * fix it unless the examiner listens for exactly this. Only fires when the new
+ * value really differs from what is stored.
+ *
+ * @param {string} text           what the candidate just said
+ * @param {Record<string,string>} profile  what the examiner currently believes
+ * @param {string} examinerLast   the examiner's previous line, for "No, it's Ravi"
+ */
+export function detectCorrection(text, profile, examinerLast = "") {
+  const t = String(text ?? "").trim();
+  const out = {};
+  if (!t || !profile) return out;
+  const marked = CORRECTION_MARKERS.test(t);
+
+  if (profile.name) {
+    const stored = firstWord(profile.name);
+    const storedRe = new RegExp(`\\b${escapeRe(stored)}\\b`, "i");
+    // "My name is Ravi" / "call me Ravi" state it outright, marker or not.
+    const stated =
+      lastCapture(t, /\b[Mm]y (?:(?:full|first|real|actual|correct) )?name(?:'s| is)\s+(?:actually\s+)?([A-Za-z][^,.!?]{0,40})/g) ??
+      lastCapture(t, /\b(?:[Yy]ou can call me|[Cc]all me|[Ii]t's pronounced|[Ii]t is pronounced)\s+([A-Za-z][^,.!?]{0,40})/g);
+    // "No, it's Ravi" / "not Robby, Ravi" only count when it is clearly about
+    // the name: the word "name", the wrong name itself, or a short reply
+    // straight after the examiner used it. "No, I'm Pakistani" is none of those.
+    const mentionsName = /\bname\b/i.test(t);
+    const shortReplyToName =
+      Boolean(examinerLast && storedRe.test(examinerLast)) &&
+      t.split(/\s+/).length <= 6 &&
+      /^\W*(?:no|nope|sorry|actually|not)\b/i.test(t);
+    const aboutName = mentionsName || storedRe.test(t) || shortReplyToName;
+    const verb = mentionsName ? "[Ii]t's|[Ii]t is|[Ii]ts|[Ii]'m|[Ii] am|is" : "[Ii]t's|[Ii]t is|[Ii]ts|[Ii]'m|[Ii] am";
+    const implied =
+      marked && aboutName
+        ? (lastCapture(t, /\bnot\s+[A-Za-z'’-]+,?\s+(?:but\s+|it's\s+|it is\s+)?([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)?)/g) ??
+          lastCapture(t, new RegExp(`\\b(?:${verb})\\s+([A-Z][A-Za-z'’-]+(?:\\s+[A-Z][A-Za-z'’-]+)?)`, "g")))
+        : null;
+    const candidate = nameFrom(stated) ?? nameFrom(implied);
+    if (candidate && firstWord(candidate) !== stored) out.name = candidate;
+  }
+
+  const place = profile.city || profile.country;
+  if (place && marked) {
+    const aboutPlace =
+      /\b(?:live|living|from|city|town|country|based)\b/i.test(t) || t.toLowerCase().includes(place.toLowerCase());
+    const said = aboutPlace
+      ? lastCapture(
+          t,
+          /\b(?:[Ll]ive in|[Ll]iving in|[Ff]rom|[Bb]ased in|[Ii]t's|[Ii]t is)\s+([A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+)?)/g,
+        )
+      : null;
+    const city = said ? clean(said.replace(/[.\s]+$/, "")) : null;
+    if (city && city.toLowerCase() !== place.toLowerCase() && !NOT_A_NAME_WORD.test(city)) out.city = city;
+  }
+
+  return out;
+}
+
 let counter = 0;
 const newSessionId = () =>
   `rt-${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${(++counter).toString().padStart(3, "0")}`;
@@ -304,6 +403,12 @@ export class ExaminerSession {
     this.followups = 0;
     /** The current segment already had its follow-up; the next answer moves on. */
     this.followupAsked = false;
+    /** A detail the candidate just corrected, still to be acknowledged aloud. */
+    this.correctionCue = null;
+    /** The candidate corrected something during the segment in progress. */
+    this.correctedThisSegment = false;
+    /** The examiner's last line, so "No, it's Ravi" can be read against it. */
+    this.lastExaminerText = "";
     /** The examiner has addressed the candidate by name at least once. */
     this.nameSaid = false;
     /** Examiner turns since it last said the candidate's name. */
@@ -617,6 +722,19 @@ export class ExaminerSession {
   /** Facts about this candidate, restated so a long call cannot lose them. */
   withMemory(directive, moment = "other") {
     const block = memoryBlock(this.profile, this.lastAnswer);
+
+    // A fresh correction outranks every other name cue: apologise once, use
+    // the right value, and do not also run the usual greeting.
+    const fix = this.correctionCue;
+    if (fix) {
+      this.correctionCue = null;
+      if (fix.key === "name") {
+        this.nameSaid = true;
+        this.turnsSinceName = 0;
+      }
+      return [block, directive, correctionCue(fix)].filter(Boolean).join("\n\n");
+    }
+
     const mode = this.nameMode(moment);
     // One chance at the "nice to meet you": if the transcript spells the name
     // differently, the examiner must not greet them again on every turn.
@@ -972,6 +1090,32 @@ export class ExaminerSession {
 
     const text = this.answerParts.join(" ").trim();
     const quality = answerQuality(text, seg);
+
+    // They spent this turn putting us right ("No, my name is Ravi, not
+    // Robby"). That is not an answer to the question — unless the question was
+    // the one asking for that detail. Apologise, then ask it again.
+    if (this.correctedThisSegment) {
+      this.correctedThisSegment = false;
+      const askedForIt = /\byour (?:full |first )?name\b|where (?:are|do) you (?:from|live|come)|which (?:city|town|country)/i.test(
+        seg.text,
+      );
+      const alsoAnswered = meaningfulWords(text).length >= 14;
+      if (!askedForIt && !alsoAnswered && (seg.kind === "ask" || seg.kind === "generated")) {
+        this.answerParts = [];
+        this.clearTimer("answerCap");
+        this.emitState("asking");
+        this.speak(correctionAckDirective(seg.kind === "ask" ? seg.text : ""), "acknowledge correction", {
+          moment: "question",
+        });
+        return;
+      }
+      if (askedForIt) {
+        this.answered = true;
+        this.advance("answered_with_correction");
+        return;
+      }
+    }
+
     if (quality === "ok" && this.shouldFollowUp(seg)) {
       // A real examiner picks up on what they hear. One short question drawn
       // from this answer; whatever comes back joins the same answer, and the
@@ -1071,6 +1215,7 @@ export class ExaminerSession {
     this.unclears = 0;
     this.settleDeadline = 0;
     this.followupAsked = false;
+    this.correctedThisSegment = false;
     this.pendingDirective = null;
     this.runSegment(reason);
   }
@@ -1104,6 +1249,31 @@ export class ExaminerSession {
   /** Read the standard opening answers off the transcript ourselves. */
   rememberFromAnswer(text) {
     this.remember(extractProfile(this.current?.text ?? "", text), "heard");
+    const fixes = detectCorrection(text, this.profile, this.lastExaminerText);
+    if (Object.keys(fixes).length) this.correct(fixes, "heard");
+  }
+
+  /**
+   * The candidate says we have something wrong. Unlike `remember`, this
+   * replaces identity details too — and the browser saves the new value, so
+   * the next question uses it as well.
+   */
+  correct(details, source) {
+    let changed = false;
+    for (const [key, raw] of Object.entries(details ?? {})) {
+      const value = clean(raw);
+      if (!value || this.profile[key] === value) continue;
+      const old = this.profile[key] ?? "";
+      this.profile[key] = value;
+      // The examiner acknowledges the most recent correction.
+      this.correctionCue = { key, old, value };
+      changed = true;
+    }
+    if (!changed) return;
+    this.correctedThisSegment = true;
+    console.log(`[${this.sessionId}] corrected (${source}):`, this.profile);
+    this.record?.setProfile?.(this.profile);
+    this.send({ t: "profile", profile: { ...this.profile }, corrected: Object.keys(details) });
   }
 
   /**
@@ -1221,6 +1391,7 @@ export class ExaminerSession {
         const text = (ev.transcript ?? this.examinerBuf).trim();
         this.examinerBuf = "";
         if (text) {
+          this.lastExaminerText = text;
           this.record?.addTurn("examiner", text, { segmentIndex: this.index });
           this.noteExaminerTurn(text);
           this.send({ t: "transcript", role: "examiner", text, segmentIndex: this.index });
@@ -1341,7 +1512,8 @@ export class ExaminerSession {
               // Only for things actually said: with no candidate speech at all
               // this is the model filling in a candidate it imagined.
               if (this.candidateSpokeEver && args.detail && args.value) {
-                this.remember({ [args.detail]: args.value }, "model");
+                if (args.correction) this.correct({ [args.detail]: args.value }, "model");
+                else this.remember({ [args.detail]: args.value }, "model");
               }
             } catch {
               /* malformed arguments — nothing worth remembering */

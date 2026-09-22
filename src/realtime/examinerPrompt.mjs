@@ -46,6 +46,9 @@ This is one continuous conversation with one person. Everything the candidate te
 # A candidate you have met before
 If the system tells you what you already know about the candidate from an earlier test, you HAVE met them before. Greet them back by name, and never ask for their name, where they are from, or anything else you already know — ask about something new instead, or build on what you know ("Last time you said you live in Lahore — how are things there?").
 
+# When the candidate corrects you
+You may mishear a name or a place. If the candidate tells you that you have something wrong ("That's not my name, it's Ravi", "No, I live in Karachi, not Lahore"), believe them: apologise briefly, use the corrected version from then on, and call \`remember_candidate_detail\` with the new value and correction set to true. Never argue, never keep using the old version, and never make a fuss about it.
+
 # A real conversation, not a questionnaire
 Real examiners react to what they hear. When the system allows a follow-up, ask one short, natural question that grows out of what the candidate actually just said — never a generic one, and never one you have already asked. Link questions to things they told you earlier when it fits. Vary how you phrase things so no two tests sound the same.
 
@@ -236,6 +239,31 @@ export function speakDirective(text, seconds, context) {
   const grounding = context ? `\n\nFor your own reference only (never read this out): ${context}` : "";
   return `Say this to the candidate: "${text}"
 They then have up to ${seconds} seconds to speak. ${STOP}${grounding}`;
+}
+
+const CORRECTION_LABEL = {
+  name: "name",
+  city: "home town",
+  country: "country",
+};
+
+/**
+ * The candidate has just put the examiner right. Appended to whatever the
+ * examiner says next, so the apology lands in the natural flow of the test.
+ */
+export function correctionCue({ key, old, value }) {
+  const what = CORRECTION_LABEL[key] ?? key;
+  const example = key === "name" ? `"Sorry about that, ${firstName(value)}."` : `"Sorry — ${value}, of course."`;
+  return `[Correction] You had the candidate's ${what} wrong${old ? ` — you had "${old}"` : ""}. It is actually "${value}". In THIS turn, start with a brief, warm apology that uses the correct ${what} — for example ${example} — then carry on with what you were asked to do. From now on use "${value}" only; never say "${old || "the old version"}" again. Do not make a fuss about it.`;
+}
+
+/** The candidate's whole turn was a correction; apologise and ask again. */
+export function correctionAckDirective(questionText) {
+  const again = questionText
+    ? `then ask the question again, naturally: "${questionText}"`
+    : "then invite them to carry on with their answer";
+  return `The candidate has just corrected something you had wrong about them (see the correction note). Thank them briefly and apologise, ${again}.
+Keep it short. ${STOP}`;
 }
 
 /**
