@@ -41,6 +41,8 @@ export class SessionRecord {
       durationMs: 0,
       audioBytesIn: 0,
       audioBytesOut: 0,
+      /** What the candidate told the examiner about themselves. */
+      profile: {},
     };
     this._timer = null;
     this._writing = false;
@@ -66,6 +68,12 @@ export class SessionRecord {
     const q = this.data.questions[index];
     if (!q) return;
     Object.assign(q, patch);
+    this.save();
+  }
+
+  /** Candidate details the examiner is holding on to (name, home town, …). */
+  setProfile(profile) {
+    this.data.profile = { ...profile };
     this.save();
   }
 

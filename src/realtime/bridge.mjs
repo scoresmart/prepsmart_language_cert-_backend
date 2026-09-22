@@ -289,6 +289,9 @@ export function attachRealtimeBridge(server, options = {}) {
         case "stop":
           session.beginClosing("candidate_stopped");
           break;
+        case "skip":
+          session.skipPart();
+          break;
         case "abort":
           void session.end("candidate_aborted");
           break;

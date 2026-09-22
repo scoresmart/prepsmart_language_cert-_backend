@@ -13,10 +13,15 @@ import WebSocket from "ws";
 import {
   askDirective,
   buildExaminerInstructions,
+  clarifyDirective,
   closingDirective,
   converseContinueDirective,
   converseDirective,
   generatedDirective,
+  firstName,
+  followupDirective,
+  memoryBlock,
+  nameCue,
   nudgeDirective,
   prepareDirective,
   sayDirective,
@@ -49,9 +54,50 @@ export const CONFIG = {
   MAX_EXAM_MS: num("REALTIME_MAX_EXAM_MS", 20 * 60_000),
   HARD_KILL_MS: num("REALTIME_HARD_KILL_MS", 22 * 60_000),
 
-  VAD_SILENCE_MS: num("REALTIME_VAD_SILENCE_MS", 700),
+  /**
+   * How long a candidate may pause mid-answer before VAD calls the turn over.
+   * Real speakers stop to think, especially at B1 — a short window here is what
+   * makes an examiner talk over its candidate.
+   */
+  VAD_SILENCE_MS: num("REALTIME_VAD_SILENCE_MS", 1_100),
+  /**
+   * Mic sensitivity. Left at the API default: the gate already keeps the room
+   * out while the examiner talks, and a high bar here does the opposite damage
+   * — a quiet or distant candidate is simply never heard.
+   */
   VAD_THRESHOLD: Number(process.env.REALTIME_VAD_THRESHOLD) || 0.5,
+
+  /**
+   * Grace after a transcript lands before the examiner is allowed to reply.
+   * If the candidate starts talking again inside it they were only drawing
+   * breath, and their next sentence joins the same answer.
+   */
+  ANSWER_SETTLE_MS: num("REALTIME_ANSWER_SETTLE_MS", 1_400),
+  /** Mic stays shut this long after the examiner's audio stops, to miss the echo tail. */
+  MIC_REOPEN_MS: num("REALTIME_MIC_REOPEN_MS", 250),
+  /** Answers with fewer real words than this are asked to be developed. */
+  MIN_ANSWER_WORDS: num("REALTIME_MIN_ANSWER_WORDS", 3),
+  /** How many times the examiner asks for more before accepting what it got. */
+  MAX_CLARIFY: num("REALTIME_MAX_CLARIFY", 2),
+  /** Unscripted Part 1 follow-ups per test, so the interview is a conversation. */
+  MAX_FOLLOWUPS: num("REALTIME_MAX_FOLLOWUPS", 2),
+  /** Chance that a good Part 1 answer earns a follow-up (while any are left). */
+  FOLLOWUP_CHANCE: Number(process.env.REALTIME_FOLLOWUP_CHANCE) || 0.55,
 };
+
+const PROFILE_KEYS = new Set(["name", "city", "country", "job", "study", "family", "interest", "home", "other"]);
+
+/** Details from earlier tests, as the browser loaded them from the database. */
+function seedProfile(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [key, value] of Object.entries(raw)) {
+    if (!PROFILE_KEYS.has(key)) continue;
+    const v = String(value ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
+    if (v) out[key] = v;
+  }
+  return out;
+}
 
 const TOOLS = [
   {
@@ -63,6 +109,28 @@ const TOOLS = [
   },
   {
     type: "function",
+    name: "remember_candidate_detail",
+    description:
+      "Record something the candidate has just told you about themselves so you still know it later in the test — their name, where they are from, their job or studies, their family, an interest. Only for things they actually said out loud.",
+    parameters: {
+      type: "object",
+      properties: {
+        detail: {
+          type: "string",
+          enum: ["name", "city", "country", "job", "study", "family", "interest", "home", "other"],
+          description: "Which kind of detail this is.",
+        },
+        value: {
+          type: "string",
+          description: "The detail exactly as the candidate gave it, e.g. 'Maria' or 'Lahore'.",
+        },
+      },
+      required: ["detail", "value"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
     name: "end_exam",
     description: "Call this only after you have delivered the final closing of the test.",
     parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
@@ -71,6 +139,111 @@ const TOOLS = [
 
 /** Segment kinds where the candidate is expected to speak. */
 const EXPECTS_ANSWER = new Set(["ask", "converse", "speak", "generated"]);
+
+/**
+ * Sounds a transcriber returns for a cough, a chair, or a filler noise. On their
+ * own they are not an answer — accepting them is what makes the examiner move
+ * on from a candidate who has not actually said anything.
+ */
+const FILLER_WORDS = new Set([
+  "a", "ah", "aha", "ahem", "eh", "em", "er", "erm", "hm", "hmm", "huh", "mhm", "mm", "mmm",
+  "oh", "uh", "uhm", "um", "umm", "the", "you", "know", "like", "so", "well", "okay", "ok",
+  "yeah", "yes", "no", "nope", "yep", "hello", "hi", "hey", "sorry", "what", "pardon", "thanks",
+  "thank",
+]);
+
+/** Words that are only noise once punctuation and case are stripped. */
+function meaningfulWords(text) {
+  return (text ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9'\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w && !FILLER_WORDS.has(w));
+}
+
+/**
+ * How usable an answer is.
+ *
+ * `empty`/`filler` — nothing to assess, the candidate has effectively not
+ * answered. `thin` — real words, but nowhere near what the question asked for.
+ * `ok` — take it and move on.
+ */
+export function answerQuality(text, seg) {
+  const words = meaningfulWords(text);
+  if (!words.length) return (text ?? "").trim() ? "filler" : "empty";
+  // Short scripted openers ("What's your name?") genuinely take two words to
+  // answer; only the longer windows expect a developed response.
+  const floor = (seg?.seconds ?? 0) >= 20 ? CONFIG.MIN_ANSWER_WORDS : 1;
+  return words.length < floor ? "thin" : "ok";
+}
+
+const clean = (v) =>
+  String(v ?? "")
+    .replace(/["“”]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 60);
+
+/**
+ * Pull the candidate's name and home town out of their own words.
+ *
+ * The model is asked to record these itself, but it forgets under load and the
+ * first two questions of every LanguageCert test are exactly these two — so the
+ * bridge reads them off the transcript as well and keeps whichever arrives.
+ */
+export function extractProfile(question, answer) {
+  const q = (question ?? "").toLowerCase();
+  const a = (answer ?? "").trim();
+  if (!a) return {};
+  const found = {};
+
+  // "What is your full name?" is the default opener — "your name" alone misses it.
+  const asksName = /\byour (?:(?:full|first|given|whole) )?name\b|\bcall you\b|\bwho am i speaking\b/.test(q);
+  const asksPlace = /where (are|do) you (from|live|come)|which (city|town|country)|whereabouts/.test(q);
+
+  const NAME_LIKE = "([A-Za-z][A-Za-z'’-]{1,20}(?:\\s+[A-Za-z][A-Za-z'’-]{1,20})?)";
+  // "My name is Ravi" says so outright. "I'm …" only means a name when the
+  // question asked for one — otherwise it is "I'm from Lahore" or "I'm fine".
+  const stated = a.match(
+    new RegExp(
+      `\\b(?:my (?:(?:full|first|whole) )?name(?:'s| is)|they call me|you can call me|call me|this is)\\s+${NAME_LIKE}`,
+      "i",
+    ),
+  );
+  const implied = a.match(new RegExp(`\\b(?:i am|i'm|im)\\s+${NAME_LIKE}`, "i"));
+  const notAName = /^(?:from|in|at|a|an|the|not|very|really|fine|good|great|well|okay|sorry|here|ready|going|doing|working|living|studying|nervous|happy|glad)\b/i;
+
+  // Transcription capitalises proper nouns, so a lower-case word after "my name
+  // is" is the sentence running on ("my name is silly to pronounce"), not a name.
+  const isName = (m) => m && /^[A-Z]/.test(m[1]) && !notAName.test(m[1]);
+
+  if (isName(stated)) found.name = clean(stated[1]);
+  else if (asksName && isName(implied)) found.name = clean(implied[1]);
+  else if (asksName) {
+    const words = a
+      .replace(/^\s*(?:it's|it is|its|sure|okay|ok|yes|so|um|uh|er)[,.\s]+/i, "")
+      .replace(/^\s*(?:it's|it is|its)\s+/i, "")
+      .replace(/[^A-Za-z'’\s-]/g, " ")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    // "Ravi" / "Ravi Kumar" — a bare name is the usual answer here.
+    if (words.length && words.length <= 3) found.name = clean(words.slice(0, 3).join(" "));
+  }
+
+  const placed = a.match(
+    /\b(?:i(?:'m| am)? (?:from|based in)|i live in|i'm living in|i come from|originally from|from)\s+([A-Za-z][A-Za-z'’.\s-]{1,30}?)(?:[,.!?]|\s+(?:and|but|which|it|that|i|we|so)\b|$)/i,
+  );
+  if (placed) found.city = clean(placed[1]);
+  else if (asksPlace) {
+    const words = a.replace(/[^A-Za-z'’\s-]/g, " ").trim().split(/\s+/).filter(Boolean);
+    if (words.length && words.length <= 3) found.city = clean(words.slice(0, 2).join(" "));
+  }
+
+  // A name that is plainly a sentence fragment is worse than no name at all.
+  if (found.name && /^(?:fine|good|well|okay|sorry|yes|no)$/i.test(found.name)) delete found.name;
+  return found;
+}
 
 let counter = 0;
 const newSessionId = () =>
@@ -109,6 +282,38 @@ export class ExaminerSession {
     /** Set during preparation time: no nudges, no upstream audio. */
     this.preparing = false;
     this.candidateSpokeEver = false;
+    /** VAD currently has an open turn — the candidate is mid-sentence. */
+    this.candidateSpeaking = false;
+    /**
+     * Mic gate. Closed whenever the examiner is speaking or its audio is still
+     * playing in the browser, so speaker echo and room noise cannot open a turn
+     * and cut the question in half.
+     */
+    this.micOpen = false;
+    /** Pieces of the current answer, joined once the candidate really stops. */
+    this.answerParts = [];
+    /** How many times we have asked for more on this segment. */
+    this.clarifies = 0;
+    /** Speech that came back untranscribable on this segment. */
+    this.unclears = 0;
+    /** Everything the candidate has told us about themselves, for continuity. */
+    this.profile = {};
+    /** The candidate was known from an earlier test — welcome back, never re-ask. */
+    this.returning = false;
+    /** Unscripted Part 1 follow-ups asked so far this test. */
+    this.followups = 0;
+    /** The current segment already had its follow-up; the next answer moves on. */
+    this.followupAsked = false;
+    /** The examiner has addressed the candidate by name at least once. */
+    this.nameSaid = false;
+    /** Examiner turns since it last said the candidate's name. */
+    this.turnsSinceName = Infinity;
+    /** Their last answer, restated to the model so it can react to it. */
+    this.lastAnswer = "";
+    /** Mic chunks received since the gate last opened — 0 means nothing is arriving. */
+    this.audioSinceOpen = 0;
+    /** When the candidate's pause is long enough to count as the end of a turn. */
+    this.settleDeadline = 0;
 
     this.examinerBuf = "";
     /**
@@ -153,7 +358,11 @@ export class ExaminerSession {
       "window",
       "postAnswer",
       "awaitTranscript",
+      "transcriptWait",
+      "answerSettle",
       "speechTail",
+      "micOpen",
+      "micGuard",
     ]) {
       this.clearTimer(n);
     }
@@ -250,6 +459,16 @@ export class ExaminerSession {
       this.segments.map((s) => ({ text: s.text || s.label, seconds: s.seconds, kind: s.kind, part: s.part })),
     );
 
+    // What earlier tests taught us. The examiner starts this one already
+    // knowing it, so it greets them back and never asks for it again.
+    this.profile = seedProfile(exam.candidateProfile);
+    this.returning = Boolean(this.profile.name);
+    if (Object.keys(this.profile).length) {
+      this.record.setProfile?.(this.profile);
+      this.send({ t: "profile", profile: { ...this.profile } });
+      console.log(`[${this.sessionId}] returning candidate:`, this.profile);
+    }
+
     this.startedAt = Date.now();
     this.emitState("connecting");
 
@@ -310,7 +529,11 @@ export class ExaminerSession {
               // auto-create responses makes the model invent unscripted questions
               // the moment the candidate stops talking.
               create_response: false,
-              interrupt_response: true,
+              // Never let detected audio cancel the examiner mid-question. The
+              // mic is shut while the examiner talks, so anything VAD picks up
+              // then is echo or room noise — and cutting the question off is
+              // exactly what the candidate experiences as "it keeps stopping".
+              interrupt_response: false,
             },
           },
           output: { format: { type: "audio/pcm", rate: 24000 }, voice: CONFIG.VOICE, speed: 1.0 },
@@ -323,26 +546,123 @@ export class ExaminerSession {
     if (this.upstream?.readyState === WebSocket.OPEN) this.upstream.send(JSON.stringify(obj));
   }
 
-  /** Mic audio from the browser. Dropped during preparation time. */
+  /**
+   * Mic audio from the browser.
+   *
+   * Dropped whenever it is not genuinely the candidate's turn — while the
+   * examiner is speaking, while its audio is still playing out of the speakers,
+   * and during silent preparation time. The browser mutes at the same moments;
+   * this is the half that cannot be bypassed by a stale message.
+   */
   pushAudio(buf) {
-    if (this.ended || this.preparing) return;
+    if (this.ended || this.preparing || !this.micOpen) return;
     if (this.upstream?.readyState !== WebSocket.OPEN) return;
+    this.audioSinceOpen += 1;
     this.record?.countAudio(buf.length, 0);
     this.up({ type: "input_audio_buffer.append", audio: buf.toString("base64") });
   }
 
+  /**
+   * Open or close the candidate's microphone.
+   *
+   * Closing tells the browser to stop capturing at source. Opening first throws
+   * away whatever the upstream buffer collected while the gate was shut, so a
+   * scrap of the examiner's own voice can never be transcribed as an answer.
+   */
+  setMicOpen(open, why = "") {
+    // Belt and braces: a lost "playback drained" must never leave a candidate
+    // talking into a dead microphone for the rest of the test. Re-armed on
+    // every close, including the ones that change nothing.
+    if (!open) this.armMicGuard();
+    if (this.micOpen === open) return;
+    this.micOpen = open;
+
+    if (open) {
+      this.clearTimer("micGuard");
+      this.audioSinceOpen = 0;
+      this.up({ type: "input_audio_buffer.clear" });
+    } else {
+      this.candidateSpeaking = false;
+    }
+
+    this.send({ t: "mic", open });
+    if (process.env.REALTIME_DEBUG) {
+      console.log(`[${this.sessionId}] mic ${open ? "open" : "closed"}${why ? ` (${why})` : ""}`);
+    }
+  }
+
+  armMicGuard() {
+    this.setTimer("micGuard", 60_000, () => {
+      if (this.ended || this.preparing || this.responseActive || this.micOpen) return;
+      console.warn(`[${this.sessionId}] mic gate stuck shut — reopening`);
+      this.setMicOpen(true, "guard");
+    });
+  }
+
   // ----------------------------------------------------- response plumbing
 
-  speak(directive, tag) {
+  /**
+   * How the candidate's name should be used on a turn of this kind.
+   * `moment`: part_start | question | check | closing | roleplay | other.
+   */
+  nameMode(moment) {
+    if (!this.profile.name || moment === "roleplay") return null;
+    if (!this.nameSaid) return this.returning ? "returning" : "first";
+    if (this.turnsSinceName < 2) return moment === "closing" ? "must" : "avoid";
+    if (moment === "part_start" || moment === "check" || moment === "closing") return "must";
+    if (moment === "question" && this.turnsSinceName >= 5) return "must";
+    return "optional";
+  }
+
+  /** Facts about this candidate, restated so a long call cannot lose them. */
+  withMemory(directive, moment = "other") {
+    const block = memoryBlock(this.profile, this.lastAnswer);
+    const mode = this.nameMode(moment);
+    // One chance at the "nice to meet you": if the transcript spells the name
+    // differently, the examiner must not greet them again on every turn.
+    if (mode === "first" || mode === "returning") this.nameSaid = true;
+    // The cue goes last so it is the freshest thing the model reads.
+    const cue = mode ? nameCue(this.profile.name, mode) : "";
+    return [block, directive, cue].filter(Boolean).join("\n\n");
+  }
+
+  /** Track whether the examiner actually said the name, so it is not overused. */
+  noteExaminerTurn(text) {
+    const first = firstName(this.profile.name);
+    if (!first) return;
+    const escaped = first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`\\b${escaped}\\b`, "i").test(text)) {
+      this.nameSaid = true;
+      this.turnsSinceName = 0;
+    } else if (this.nameSaid) {
+      this.turnsSinceName = Number.isFinite(this.turnsSinceName) ? this.turnsSinceName + 1 : 1;
+    }
+  }
+
+  /**
+   * @param {string} directive
+   * @param {string} [tag]
+   * @param {{ urgent?: boolean, moment?: string }} [opts] `urgent` speaks over
+   *   the candidate — only for the deliberate interruptions (time up, closing
+   *   the test). `moment` decides whether the candidate's name is used.
+   */
+  speak(directive, tag, opts = {}) {
     if (this.ended) return;
-    if (this.responseActive) {
-      this.pendingDirective = { directive, tag };
+    // Never talk over an answer in progress. The examiner waits for the
+    // candidate to finish, exactly as a real one would.
+    if (this.responseActive || (this.candidateSpeaking && !opts.urgent)) {
+      this.pendingDirective = { directive, tag, opts };
       return;
     }
     this.responseActive = true;
+    this.setMicOpen(false, "examiner speaking");
     this.up({
       type: "conversation.item.create",
-      item: { type: "message", role: "system", content: [{ type: "input_text", text: directive }] },
+      item: {
+        type: "message",
+        role: "system",
+        content: [{ type: "input_text", text: this.withMemory(directive, opts.moment) }],
+      },
     });
     this.up({ type: "response.create" });
     if (tag) console.log(`[${this.sessionId}] -> ${tag}`);
@@ -351,7 +671,7 @@ export class ExaminerSession {
   flushPending() {
     const next = this.pendingDirective;
     this.pendingDirective = null;
-    if (next) this.speak(next.directive, next.tag);
+    if (next) this.speak(next.directive, next.tag, next.opts ?? {});
     return Boolean(next);
   }
 
@@ -381,16 +701,8 @@ export class ExaminerSession {
       return;
     }
 
-    this.index = next;
-    this.answered = false;
-    this.heardSpeech = false;
-    this.pendingAdvance = false;
-    this.windowStarted = false;
-    this.windowStartedAt = 0;
-    this.nudges = 0;
-    this.preparing = false;
-
-    this.runSegment(reason);
+    // Any directive queued for the segment that just ended is stale now.
+    this.advanceTo(next, reason);
   }
 
   runSegment(reason) {
@@ -418,20 +730,23 @@ export class ExaminerSession {
     switch (seg.kind) {
       case "say":
         this.emitState("examiner");
-        this.speak(sayDirective(seg.text), `say: ${seg.label}`);
+        this.speak(sayDirective(seg.text), `say: ${seg.label}`, {
+          // A new part is where a real examiner turns to the candidate by name.
+          moment: seg.part > 0 && /introduction|transition|next situation/i.test(seg.label) ? "part_start" : "other",
+        });
         break;
 
       case "ask": {
         this.emitState("asking");
         const prev = this.segments[this.index - 1];
         const acknowledge = Boolean(prev && EXPECTS_ANSWER.has(prev.kind));
-        this.speak(askDirective(seg.text, acknowledge), `ask: ${seg.label}`);
+        this.speak(askDirective(seg.text, acknowledge), `ask: ${seg.label}`, { moment: "question" });
         break;
       }
 
       case "converse":
         this.emitState("asking");
-        this.speak(converseDirective(seg.text, seg.seconds), `converse: ${seg.label}`);
+        this.speak(converseDirective(seg.text, seg.seconds), `converse: ${seg.label}`, { moment: "roleplay" });
         break;
 
       case "prepare":
@@ -450,6 +765,7 @@ export class ExaminerSession {
         this.speak(
           generatedDirective(seg.context, seg.generatedIndex, seg.generatedTotal, seg.part),
           `generated q${seg.generatedIndex}/${seg.generatedTotal}: ${seg.label}`,
+          { moment: "question" },
         );
         break;
 
@@ -514,6 +830,15 @@ export class ExaminerSession {
     const seg = this.current;
     if (!seg || seg.kind === "say") return;
 
+    // The examiner has finished and the speakers are quiet. Give the room a
+    // moment to settle, then hand the microphone back.
+    if (seg.kind !== "prepare" && !this.responseActive) {
+      this.setTimer("micOpen", CONFIG.MIC_REOPEN_MS, () => {
+        if (this.ended || this.preparing || this.responseActive) return;
+        this.setMicOpen(true, "candidate's turn");
+      });
+    }
+
     if (seg.kind === "prepare") {
       // Silent thinking time. No nudges, no upstream audio, no interruptions —
       // the candidate is not supposed to be speaking yet.
@@ -538,7 +863,10 @@ export class ExaminerSession {
         this.windowStartedAt = Date.now();
         this.setTimer("window", seg.seconds * 1000, () => this.advance("window_over"));
       }
-      if (!this.answered) this.armSilenceLadder();
+      // Silence in a role play gets the same "please answer" as anywhere else;
+      // the final-grace check refuses to end a test the candidate has been
+      // talking in, so this can only prompt, never abandon them.
+      this.armSilenceLadder();
       return;
     }
 
@@ -565,20 +893,241 @@ export class ExaminerSession {
   }
 
   onSilence() {
-    if (this.ended || this.closingSent || this.answered || this.preparing) return;
+    if (this.ended || this.closingSent || this.preparing) return;
     const seg = this.current;
     if (!seg) return;
+    // A role play stays open after an answer, so silence inside it still needs
+    // prompting; anywhere else an answered segment is simply waiting to move on.
+    if (this.answered && seg.kind !== "converse") return;
+
+    // They did answer, it was just brief, and the examiner has already asked
+    // for more. Silence now means that is all they have — take it and move on.
+    // Nudging on towards "no response" would end a test they are sitting.
+    if (this.answerParts.length) {
+      console.log(`[${this.sessionId}] short answer, nothing added — accepting it`);
+      this.answered = true;
+      this.advance("short_answer_accepted");
+      return;
+    }
+
+    // Silence with no audio arriving at all is not a quiet candidate: the
+    // browser is not sending, so no amount of talking will ever be heard. Say
+    // so plainly in the log and on screen rather than blaming the candidate.
+    const micSilent = this.audioSinceOpen === 0;
+    if (micSilent) {
+      console.warn(
+        `[${this.sessionId}] no microphone audio has reached the bridge since the gate opened — ` +
+          `check the browser tab's mic permission, and that this bridge is the one the page is talking to`,
+      );
+    }
 
     this.nudges += 1;
     this.record.markQuestion(this.index, { nudges: this.nudges });
-    this.send({ t: "nudge", level: this.nudges, max: CONFIG.MAX_NUDGES, index: this.index });
+    this.send({ t: "nudge", level: this.nudges, max: CONFIG.MAX_NUDGES, index: this.index, micSilent });
     this.emitState(this.nudges >= CONFIG.MAX_NUDGES ? "no_response" : "nudging");
 
     const questionText = seg.kind === "ask" ? seg.text : "";
-    this.speak(nudgeDirective(this.nudges, questionText), `nudge ${this.nudges}/${CONFIG.MAX_NUDGES}`);
+    this.speak(nudgeDirective(this.nudges, questionText), `nudge ${this.nudges}/${CONFIG.MAX_NUDGES}`, {
+      moment: "check",
+    });
 
     // Fallback in case that response never completes and re-arms the ladder.
     this.setTimer("silence", CONFIG.NUDGE_MS * 2 + 15_000, () => this.onSilence());
+  }
+
+  /**
+   * The candidate has genuinely finished this answer.
+   *
+   * Only reached once they have stopped speaking long enough that the pause is
+   * not a thinking pause, so nothing here can talk over them.
+   */
+  onAnswerComplete() {
+    if (this.ended || this.closingSent) return;
+    if (this.candidateSpeaking) return; // still going; the next transcript re-arms this
+    const seg = this.current;
+    if (!seg) return;
+
+    // The pause outlasted the settle window but the transcript is still in
+    // flight. Nothing can be judged yet — the transcript handler calls back the
+    // moment it lands, and `transcriptWait` covers one that never does.
+    if (!this.answerParts.length && this.heardSpeech && this.timers.has("transcriptWait")) return;
+
+    // A role play is a conversation: reply in character every time they speak
+    // and keep it going until the window closes, rather than treating the first
+    // turn as the answer and falling silent.
+    if (seg.kind === "converse") {
+      this.answered = true;
+      this.answerParts = [];
+      const elapsed = this.windowStartedAt ? Date.now() - this.windowStartedAt : 0;
+      const left = Math.max(0, Math.round((seg.seconds * 1000 - elapsed) / 1000));
+      if (left > 4) {
+        this.speak(converseContinueDirective(seg.text, left), `role play reply (${left}s left)`, {
+          moment: "roleplay",
+        });
+      }
+      return;
+    }
+
+    if (this.answered) return;
+
+    const text = this.answerParts.join(" ").trim();
+    const quality = answerQuality(text, seg);
+    if (quality === "ok" && this.shouldFollowUp(seg)) {
+      // A real examiner picks up on what they hear. One short question drawn
+      // from this answer; whatever comes back joins the same answer, and the
+      // next pause moves the test on.
+      this.followups += 1;
+      this.followupAsked = true;
+      this.clearTimer("answerCap");
+      console.log(`[${this.sessionId}] follow-up ${this.followups}/${CONFIG.MAX_FOLLOWUPS} on ${seg.label}`);
+      this.emitState("asking");
+      this.speak(followupDirective(this.lastAnswer), `follow-up ${this.followups}`, { moment: "question" });
+      return;
+    }
+
+    if (quality === "ok" || this.clarifies >= CONFIG.MAX_CLARIFY) {
+      this.answered = true;
+      this.advance(quality === "ok" ? "answered" : "answered_short");
+      return;
+    }
+
+    // Too short or nothing but a filler sound. A real examiner asks for more
+    // instead of quietly moving on, so that is what happens here — the segment
+    // stays open and whatever they add joins the same answer.
+    this.clarifies += 1;
+    console.log(`[${this.sessionId}] answer too thin (${quality}) — asking for more ${this.clarifies}/${CONFIG.MAX_CLARIFY}`);
+    this.send({ t: "clarify", reason: quality, level: this.clarifies, max: CONFIG.MAX_CLARIFY, index: this.index });
+    this.emitState("nudging");
+    this.speak(
+      clarifyDirective("thin", seg.kind === "ask" ? seg.text : "", this.clarifies),
+      `ask for more ${this.clarifies}/${CONFIG.MAX_CLARIFY}`,
+    );
+  }
+
+  /** Whether this Part 1 answer gets an unscripted follow-up question. */
+  shouldFollowUp(seg) {
+    if (seg.part !== 1 || (seg.kind !== "ask" && seg.kind !== "generated")) return false;
+    if (this.followupAsked || this.followups >= CONFIG.MAX_FOLLOWUPS) return false;
+    // Name and home town are facts, not conversation starters.
+    if (/\byour (?:full |first )?name\b|where (?:are|do) you (?:from|live|come)/i.test(seg.text)) return false;
+    // Never at the cost of the later parts.
+    const elapsed = this.startedAt ? Date.now() - this.startedAt : 0;
+    if (elapsed > CONFIG.MAX_EXAM_MS * 0.35) return false;
+    return Math.random() < CONFIG.FOLLOWUP_CHANCE;
+  }
+
+  /**
+   * The candidate asked to skip the rest of this part. Everything left in it is
+   * marked skipped and the examiner goes straight to the next part — or closes
+   * the test when this was the last one.
+   */
+  skipPart() {
+    if (this.ended || this.closingSent || !this.segments.length) return;
+    const cur = this.current;
+    // The introduction (part 0) belongs to Part 1.
+    const part = Math.max(1, cur?.part ?? 1);
+    let next = this.segments.findIndex((s, i) => i > this.index && s.part > part);
+    // The final goodbye is part 0 — it is the closing, not a part to jump to.
+    if (next >= 0 && this.segments[next].part === 0) next = -1;
+
+    console.log(`[${this.sessionId}] candidate skipped part ${part}`);
+
+    // Stop the examiner mid-sentence; the browser has already dropped its queue.
+    if (this.responseActive) this.up({ type: "response.cancel" });
+    this.send({ t: "audio.clear" });
+    this.playbackEndsAt = 0;
+    this.candidateSpeaking = false;
+    this.pendingDirective = null;
+    this.preparing = false;
+
+    if (next < 0) {
+      this.beginClosing("candidate_stopped");
+      return;
+    }
+
+    // Close the segment in progress, then mark everything between as skipped.
+    this.clearSegmentTimers();
+    this.finalizeCurrent();
+    for (let i = this.index + 1; i < next; i++) {
+      const s = this.segments[i];
+      s._done = true;
+      this.record.markQuestion(i, { status: EXPECTS_ANSWER.has(s.kind) ? "skipped" : "delivered" });
+    }
+    this.advanceTo(next, "skipped_part");
+  }
+
+  /** Run segment `next` with fresh per-segment state. */
+  advanceTo(next, reason) {
+    this.index = next;
+    this.answered = false;
+    this.heardSpeech = false;
+    this.pendingAdvance = false;
+    this.windowStarted = false;
+    this.windowStartedAt = 0;
+    this.nudges = 0;
+    this.preparing = false;
+    this.answerParts = [];
+    this.clarifies = 0;
+    this.unclears = 0;
+    this.settleDeadline = 0;
+    this.followupAsked = false;
+    this.pendingDirective = null;
+    this.runSegment(reason);
+  }
+
+  /** Real speech, but nothing came back that can be assessed. */
+  onUnintelligible() {
+    if (this.ended || this.closingSent || this.answered) return;
+    const seg = this.current;
+    if (!seg) return;
+
+    this.heardSpeech = false;
+    this.answerParts = [];
+
+    if (this.unclears >= CONFIG.MAX_CLARIFY) {
+      this.answered = true;
+      this.advance("speech_without_transcript");
+      return;
+    }
+
+    this.unclears += 1;
+    this.send({ t: "clarify", reason: "unclear", level: this.unclears, max: CONFIG.MAX_CLARIFY, index: this.index });
+    this.emitState("nudging");
+    this.speak(
+      clarifyDirective("unclear", seg.kind === "ask" ? seg.text : "", this.unclears),
+      `could not hear ${this.unclears}/${CONFIG.MAX_CLARIFY}`,
+    );
+  }
+
+  // ------------------------------------------------------ candidate memory
+
+  /** Read the standard opening answers off the transcript ourselves. */
+  rememberFromAnswer(text) {
+    this.remember(extractProfile(this.current?.text ?? "", text), "heard");
+  }
+
+  /**
+   * Keep what the candidate told us. First answer wins for the identity
+   * details — once they have said their name, nothing later may quietly
+   * rename them.
+   */
+  remember(details, source) {
+    const sticky = new Set(["name", "city", "country"]);
+    let changed = false;
+
+    for (const [key, raw] of Object.entries(details ?? {})) {
+      const value = clean(raw);
+      if (!value) continue;
+      if (this.profile[key] === value) continue;
+      if (this.profile[key] && sticky.has(key)) continue;
+      this.profile[key] = value;
+      changed = true;
+    }
+
+    if (!changed) return;
+    console.log(`[${this.sessionId}] remembered (${source}):`, this.profile);
+    this.record?.setProfile?.(this.profile);
+    this.send({ t: "profile", profile: { ...this.profile } });
   }
 
   /** Records how the segment in progress ended, exactly once. */
@@ -587,7 +1136,12 @@ export class ExaminerSession {
     if (!seg || seg._done || !this.record) return;
     seg._done = true;
     this.record.markQuestion(this.index, {
-      status: EXPECTS_ANSWER.has(seg.kind) ? (this.answered ? "answered" : "skipped") : "delivered",
+      // Words already heard count, even when the part was cut short mid-answer.
+      status: EXPECTS_ANSWER.has(seg.kind)
+        ? this.answered || this.answerParts.length
+          ? "answered"
+          : "skipped"
+        : "delivered",
       answeredAt: new Date().toISOString(),
       nudges: this.nudges,
     });
@@ -604,7 +1158,7 @@ export class ExaminerSession {
     this.emitState("closing");
 
     const ending = this.segments[this.segments.length - 1]?.text ?? "Thank you. This is the end of the test.";
-    this.speak(closingDirective(reason, ending), `closing (${reason})`);
+    this.speak(closingDirective(reason, ending), `closing (${reason})`, { urgent: true, moment: "closing" });
     this.setTimer("closeGuard", 25_000, () => void this.end(reason));
   }
 
@@ -621,6 +1175,11 @@ export class ExaminerSession {
     switch (ev.type) {
       case "session.updated": {
         this.send({ t: "ready", sessionId: this.sessionId, total: this.segments.length });
+        // Tell the browser straight away that this bridge drives the mic gate.
+        // Without a first frame it cannot tell a bridge that keeps the gate shut
+        // from an older one that never sends frames at all, and it would rather
+        // listen to the room than leave the candidate muted all test.
+        this.send({ t: "mic", open: false });
         this.advance("start");
         break;
       }
@@ -629,6 +1188,9 @@ export class ExaminerSession {
         const msg = ev.error?.message ?? "Realtime API error";
         console.error(`[${this.sessionId}] upstream error:`, msg);
         if (/active response/i.test(msg)) this.responseActive = false;
+        // Clearing an input buffer that is already empty is routine here — the
+        // gate clears on every reopen — and is no reason to alarm the candidate.
+        else if (/buffer/i.test(msg) && /empty|already|clear/i.test(msg)) break;
         else this.fail(msg);
         break;
       }
@@ -660,6 +1222,7 @@ export class ExaminerSession {
         this.examinerBuf = "";
         if (text) {
           this.record?.addTurn("examiner", text, { segmentIndex: this.index });
+          this.noteExaminerTurn(text);
           this.send({ t: "transcript", role: "examiner", text, segmentIndex: this.index });
         }
         break;
@@ -667,8 +1230,17 @@ export class ExaminerSession {
 
       case "input_audio_buffer.speech_started": {
         if (this.preparing) break; // thinking aloud during prep is not an answer
+        // The gate is shut: this is speaker echo or room noise, not an answer.
+        if (!this.micOpen) break;
         this.candidateSpokeEver = true;
         this.heardSpeech = true;
+        this.candidateSpeaking = true;
+        // They are answering, so anything queued for their silence is stale.
+        this.pendingDirective = null;
+        // Still talking — an answer we thought had ended has not.
+        this.clearTimer("answerSettle");
+        this.clearTimer("transcriptWait");
+        this.settleDeadline = 0;
         // Barge-in: they answered over the tail of the question, so their turn
         // has plainly started — stop waiting for playback to drain.
         this.awaitingPlayback = false;
@@ -687,7 +1259,10 @@ export class ExaminerSession {
           this.setTimer("answerCap", seg.seconds * 1000 + CONFIG.ANSWER_SLACK_MS, () => {
             if (this.ended || this.closingSent) return;
             this.answered = true;
-            this.speak(timeUpDirective(), `time up: ${seg.label}`);
+            this.clearTimer("answerSettle");
+            // The one time an examiner is allowed to speak over the candidate:
+            // the part is out of time and the test has to move.
+            this.speak(timeUpDirective(), `time up: ${seg.label}`, { urgent: true });
             this.setTimer("stall", CONFIG.STALL_MS + 4_000, () => this.advance("answer_cap"));
           });
         }
@@ -695,53 +1270,61 @@ export class ExaminerSession {
       }
 
       case "input_audio_buffer.speech_stopped": {
+        this.candidateSpeaking = false;
         this.send({ t: "candidate.speaking", speaking: false });
         if (this.preparing || this.answered) break;
+
+        // Start counting the pause here, not when the transcript lands.
+        // Transcription takes a few seconds, and waiting the settle window on
+        // top of it adds a silence the candidate reads as the examiner being
+        // slow. If they resume inside it, speech_started cancels this.
+        this.settleDeadline = Date.now() + CONFIG.ANSWER_SETTLE_MS;
+        this.setTimer("answerSettle", CONFIG.ANSWER_SETTLE_MS, () => this.onAnswerComplete());
+
         // Speech was heard, so an answer was attempted. If transcription never
-        // returns anything usable, still treat it as an attempt rather than
-        // leaving the candidate in silence.
+        // returns anything usable the candidate still spoke — ask them to say it
+        // again rather than silently crediting an answer nobody can assess.
         this.setTimer("transcriptWait", 6_000, () => {
           if (this.ended || this.closingSent || this.answered) return;
           const seg = this.current;
           if (!seg || seg.kind === "converse") return;
-          console.log(`[${this.sessionId}] speech heard but nothing transcribed — moving on`);
-          this.answered = true;
-          this.advance("speech_without_transcript");
+          console.log(`[${this.sessionId}] speech heard but nothing transcribed`);
+          this.onUnintelligible();
         });
         break;
       }
 
       case "conversation.item.input_audio_transcription.completed": {
         const text = (ev.transcript ?? "").trim();
-        if (text && !this.preparing) {
-          this.answered = true;
-          this.nudges = 0;
-          this.clearTimer("silence");
-          this.clearTimer("finalGrace");
-          this.record?.addTurn("candidate", text, { segmentIndex: this.index });
-          this.send({ t: "transcript", role: "candidate", text, segmentIndex: this.index });
+        // The gate was shut when this audio was captured, so it is the
+        // examiner's own voice coming back through the speakers.
+        if (!text || this.preparing || !this.heardSpeech) break;
 
-          this.pendingAdvance = false;
-          this.clearTimer("awaitTranscript");
-          this.clearTimer("transcriptWait");
+        this.nudges = 0;
+        this.clearTimer("silence");
+        this.clearTimer("finalGrace");
+        this.clearTimer("awaitTranscript");
+        this.clearTimer("transcriptWait");
+        this.pendingAdvance = false;
 
-          // Nothing speaks unless this bridge says so, which makes the answer
-          // itself the trigger for what happens next.
-          const seg = this.current;
-          if (!seg) break;
+        this.record?.addTurn("candidate", text, { segmentIndex: this.index });
+        this.send({ t: "transcript", role: "candidate", text, segmentIndex: this.index });
+        this.answerParts.push(text);
+        this.lastAnswer = this.answerParts.join(" ").slice(-400);
+        this.rememberFromAnswer(text);
 
-          if (seg.kind === "converse") {
-            // Keep the role play alive until its window closes; the examiner's
-            // reply and the next question are one turn.
-            const elapsed = this.windowStartedAt ? Date.now() - this.windowStartedAt : 0;
-            const left = Math.max(0, Math.round((seg.seconds * 1000 - elapsed) / 1000));
-            if (left > 4) {
-              this.speak(converseContinueDirective(seg.text, left), `role play reply (${left}s left)`);
-            }
-            break;
-          }
-
-          this.advance("answered");
+        // VAD ends a turn on a pause, and candidates at this level pause to
+        // think mid-answer. The pause has to outlast the settle window before
+        // the examiner may reply; that clock started when they stopped talking,
+        // so by the time a transcript arrives it has usually already run out.
+        const waited = this.settleDeadline ? this.settleDeadline - Date.now() : CONFIG.ANSWER_SETTLE_MS;
+        if (waited <= 0 && !this.candidateSpeaking) {
+          this.clearTimer("answerSettle");
+          this.onAnswerComplete();
+        } else {
+          this.setTimer("answerSettle", Math.max(waited, 0) || CONFIG.ANSWER_SETTLE_MS, () =>
+            this.onAnswerComplete(),
+          );
         }
         break;
       }
@@ -752,6 +1335,18 @@ export class ExaminerSession {
 
         const calls = (ev.response?.output ?? []).filter((o) => o.type === "function_call");
         for (const call of calls) {
+          if (call.name === "remember_candidate_detail") {
+            try {
+              const args = JSON.parse(call.arguments ?? "{}");
+              // Only for things actually said: with no candidate speech at all
+              // this is the model filling in a candidate it imagined.
+              if (this.candidateSpokeEver && args.detail && args.value) {
+                this.remember({ [args.detail]: args.value }, "model");
+              }
+            } catch {
+              /* malformed arguments — nothing worth remembering */
+            }
+          }
           this.up({
             type: "conversation.item.create",
             item: { type: "function_call_output", call_id: call.call_id, output: JSON.stringify({ ok: true }) },
@@ -780,6 +1375,14 @@ export class ExaminerSession {
             return;
           }
 
+          // The transcript is already in and waiting out its settle window. The
+          // bridge decides when that answer is finished — not the model, which
+          // cannot tell a thinking pause from the end of a turn.
+          if (this.answerParts.length || this.timers.has("answerSettle")) {
+            this.onExaminerFinishedSpeaking();
+            return;
+          }
+
           // The model routinely signals a second or two before transcription
           // lands, so "no transcript yet" is not proof of a hallucination.
           // Whether VAD actually heard audio is. If it did, hold the script and
@@ -789,10 +1392,10 @@ export class ExaminerSession {
             this.setTimer("awaitTranscript", 5_000, () => {
               if (this.ended || this.closingSent || this.answered) return;
               // Real speech, but nothing transcribable came back (too quiet, or
-              // not English). Still an attempt — move on rather than nudge.
+              // lost in noise). Ask them to say it again rather than crediting
+              // an answer nobody can assess.
               this.pendingAdvance = false;
-              this.answered = true;
-              this.advance("speech_without_transcript");
+              this.onUnintelligible();
             });
             return;
           }
