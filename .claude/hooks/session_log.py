@@ -15,8 +15,10 @@ Env:
 Stdlib only. Never blocks a session: errors go to errors.log and the hook
 exits 0.
 """
+import getpass
 import json
 import os
+import socket
 import re
 import subprocess
 import sys
@@ -97,6 +99,14 @@ def who(cwd):
     return git(cwd, "config", "user.email") or os.environ.get("USER") or "unknown"
 
 
+def machine_info():
+    try:
+        os_user = getpass.getuser()
+    except Exception:
+        os_user = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown"
+    return {"machine": socket.gethostname() or "unknown", "os_user": os_user}
+
+
 # ---------- Database (Supabase PostgREST, service role) ----------
 
 def db_enabled():
@@ -131,6 +141,8 @@ def db_upsert_session(state, extra=None):
         "repo": state["repo"],
         "branch": state.get("branch") or None,
         "user_email": state.get("user"),
+        "machine_name": state.get("machine") or None,
+        "os_user": state.get("os_user") or None,
         "model": state.get("model") or None,
         "start_source": state.get("source") or None,
         "head_at_start": state.get("head") or None,
@@ -200,6 +212,7 @@ def load_or_init(inp):
             "started_at": now(),
             "user": who(cwd),
             "model": inp.get("model", ""),
+            **machine_info(),
             "transcript_path": inp.get("transcript_path", ""),
             "cwd": cwd,
             **repo_info(cwd),
@@ -245,6 +258,8 @@ def handle_session_start(inp):
         "type": "session_start",
         "source": state["source"],
         "user": state["user"],
+        "machine": state.get("machine", ""),
+        "os_user": state.get("os_user", ""),
         "repo": state["repo"],
         "branch": state["branch"],
         "head": state["head"],
