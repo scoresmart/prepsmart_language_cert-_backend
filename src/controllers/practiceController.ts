@@ -101,12 +101,14 @@ export async function getPracticeProgress(req: Request, res: Response, next: Nex
 // POST /api/v1/practice/attempts
 export async function savePracticeAttempt(req: Request, res: Response, next: NextFunction) {
   try {
-    const { question_type, question_set_id, score, total } = req.body;
+    const { question_type, question_set_id, score, total, answer } = req.body;
     const student_id = req.user!.sub;
+    // Student's answer snapshot for the admin Practice Logs popup. Optional.
+    const answerValue = answer && typeof answer === 'object' ? answer : null;
 
     const { data, error } = await getSupabase()
       .from('practice_attempts')
-      .insert({ student_id, question_type, question_set_id, score, total })
+      .insert({ student_id, question_type, question_set_id, score, total, answer: answerValue })
       .select()
       .single();
 
@@ -145,7 +147,7 @@ export async function getAdminPracticeLogs(req: Request, res: Response, next: Ne
 
     const { data: attempts, error } = await getSupabase()
       .from('practice_attempts')
-      .select('id, student_id, question_type, question_set_id, score, total, scoring_status, created_at')
+      .select('id, student_id, question_type, question_set_id, score, total, scoring_status, answer, created_at')
       .order('created_at', { ascending: false })
       .limit(limit);
 
