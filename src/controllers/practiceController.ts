@@ -147,11 +147,38 @@ export async function getAdminPracticeLogs(req: Request, res: Response, next: Ne
 
     const { data: attempts, error } = await getSupabase()
       .from('practice_attempts')
-      .select('id, student_id, question_type, question_set_id, score, total, scoring_status, answer, created_at')
+      .select('id, student_id, question_type, question_set_id, score, total, scoring_status, answer, score_details, created_at')
       .order('created_at', { ascending: false })
       .limit(limit);
 
     if (error) throw error;
+
+    // Speaking attempts saved before answers were stored have no `answer`.
+    // Rebuild their transcript: realtime sessions from lc_speaking_live_attempts,
+    // recorded audio from the transcript kept in score_details.
+    const speakingIds = (attempts ?? [])
+      .filter((row) => row.question_type?.startsWith('speaking') && !row.answer)
+      .map((row) => row.id);
+    const liveTurns = new Map<string, { role: string; text: string }[]>();
+
+    if (speakingIds.length > 0) {
+      const { data: liveRows, error: liveError } = await getSupabase()
+        .from('lc_speaking_live_attempts')
+        .select('practice_attempt_id, transcript')
+        .in('practice_attempt_id', speakingIds);
+
+      if (liveError) throw liveError;
+
+      for (const live of liveRows ?? []) {
+        const turns = (Array.isArray(live.transcript) ? live.transcript : [])
+          .filter((turn: { text?: unknown }) => typeof turn?.text === 'string' && turn.text.trim())
+          .map((turn: { role?: string; text: string }) => ({
+            role: turn.role === 'candidate' ? 'student' : 'examiner',
+            text: turn.text,
+          }));
+        if (turns.length > 0) liveTurns.set(live.practice_attempt_id, turns);
+      }
+    }
 
     const studentIds = [...new Set((attempts ?? []).map((row) => row.student_id))];
     const profileMap = new Map<string, { name?: string | null; email?: string | null }>();
@@ -170,9 +197,23 @@ export async function getAdminPracticeLogs(req: Request, res: Response, next: Ne
     }
 
     const rows = (attempts ?? []).map((row) => {
+      const { score_details: scoreDetails, ...rest } = row;
       const profile = profileMap.get(row.student_id);
+
+      let answer = row.answer ?? null;
+      if (!answer && row.question_type?.startsWith('speaking')) {
+        const turns = liveTurns.get(row.id);
+        const audioTranscript = (scoreDetails as { transcript?: unknown } | null)?.transcript;
+        if (turns) {
+          answer = { kind: 'speaking', turns };
+        } else if (typeof audioTranscript === 'string' && audioTranscript.trim()) {
+          answer = { kind: 'speaking', turns: [{ role: 'student', text: audioTranscript }] };
+        }
+      }
+
       return {
-        ...row,
+        ...rest,
+        answer,
         module: moduleForQuestionType(row.question_type),
         student_name: profile?.name ?? null,
         student_email: profile?.email ?? null,
