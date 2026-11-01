@@ -159,12 +159,15 @@ export async function getAdminPracticeLogs(req: Request, res: Response, next: Ne
     const speakingIds = (attempts ?? [])
       .filter((row) => row.question_type?.startsWith('speaking') && !row.answer)
       .map((row) => row.id);
-    const liveTurns = new Map<string, { role: string; text: string }[]>();
+    const liveSpeaking = new Map<
+      string,
+      { turns: { role: string; text: string }[]; audio: { label: string; url: string }[] }
+    >();
 
     if (speakingIds.length > 0) {
       const { data: liveRows, error: liveError } = await getSupabase()
         .from('lc_speaking_live_attempts')
-        .select('practice_attempt_id, transcript')
+        .select('practice_attempt_id, transcript, recordings')
         .in('practice_attempt_id', speakingIds);
 
       if (liveError) throw liveError;
@@ -176,7 +179,23 @@ export async function getAdminPracticeLogs(req: Request, res: Response, next: Ne
             role: turn.role === 'candidate' ? 'student' : 'examiner',
             text: turn.text,
           }));
-        if (turns.length > 0) liveTurns.set(live.practice_attempt_id, turns);
+
+        // Private bucket: sign each part recording so the admin can play it.
+        const recordings = Array.isArray(live.recordings) ? live.recordings : [];
+        const audio: { label: string; url: string }[] = [];
+        for (const rec of recordings as { part?: number; path?: string }[]) {
+          if (!rec?.path) continue;
+          const { data: signed } = await getSupabase()
+            .storage.from('lc-speaking-recordings')
+            .createSignedUrl(rec.path, 60 * 60);
+          if (signed?.signedUrl) {
+            audio.push({ label: rec.part ? `Part ${rec.part}` : 'Recording', url: signed.signedUrl });
+          }
+        }
+
+        if (turns.length > 0 || audio.length > 0) {
+          liveSpeaking.set(live.practice_attempt_id, { turns, audio });
+        }
       }
     }
 
@@ -202,12 +221,19 @@ export async function getAdminPracticeLogs(req: Request, res: Response, next: Ne
 
       let answer = row.answer ?? null;
       if (!answer && row.question_type?.startsWith('speaking')) {
-        const turns = liveTurns.get(row.id);
-        const audioTranscript = (scoreDetails as { transcript?: unknown } | null)?.transcript;
-        if (turns) {
-          answer = { kind: 'speaking', turns };
-        } else if (typeof audioTranscript === 'string' && audioTranscript.trim()) {
-          answer = { kind: 'speaking', turns: [{ role: 'student', text: audioTranscript }] };
+        const live = liveSpeaking.get(row.id);
+        const details = scoreDetails as { transcript?: unknown; recordingUrl?: unknown } | null;
+        const audioTranscript = typeof details?.transcript === 'string' ? details.transcript.trim() : '';
+        const audioUrl = typeof details?.recordingUrl === 'string' ? details.recordingUrl : '';
+
+        if (live) {
+          answer = { kind: 'speaking', turns: live.turns, audio: live.audio };
+        } else if (audioTranscript || audioUrl) {
+          answer = {
+            kind: 'speaking',
+            turns: audioTranscript ? [{ role: 'student', text: audioTranscript }] : [],
+            audio: audioUrl ? [{ label: 'Recording', url: audioUrl }] : [],
+          };
         }
       }
 
