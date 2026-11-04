@@ -119,6 +119,77 @@ export async function savePracticeAttempt(req: Request, res: Response, next: Nex
   }
 }
 
+type SpeakingAnswer = {
+  kind: 'speaking';
+  turns: { role: string; text: string }[];
+  audio: { label: string; url: string }[];
+};
+
+/**
+ * Answers for speaking attempts that have no stored `answer` (saved before answers were
+ * stored): realtime sessions from lc_speaking_live_attempts (transcript + signed recordings),
+ * recorded audio from the transcript and recording URL kept in score_details.
+ */
+async function speakingAnswersFor(
+  rows: { id: string; question_type: string; answer?: unknown; score_details?: unknown }[],
+): Promise<Map<string, SpeakingAnswer>> {
+  const result = new Map<string, SpeakingAnswer>();
+  const speaking = rows.filter((row) => row.question_type?.startsWith('speaking') && !row.answer);
+  const speakingIds = speaking.map((row) => row.id);
+
+  if (speakingIds.length > 0) {
+    const { data: liveRows, error } = await getSupabase()
+      .from('lc_speaking_live_attempts')
+      .select('practice_attempt_id, transcript, recordings')
+      .in('practice_attempt_id', speakingIds);
+
+    if (error) throw error;
+
+    for (const live of liveRows ?? []) {
+      const turns = (Array.isArray(live.transcript) ? live.transcript : [])
+        .filter((turn: { text?: unknown }) => typeof turn?.text === 'string' && turn.text.trim())
+        .map((turn: { role?: string; text: string }) => ({
+          role: turn.role === 'candidate' ? 'student' : 'examiner',
+          text: turn.text,
+        }));
+
+      // Private bucket: sign each part recording so it can be played.
+      const recordings = Array.isArray(live.recordings) ? live.recordings : [];
+      const audio: { label: string; url: string }[] = [];
+      for (const rec of recordings as { part?: number; path?: string }[]) {
+        if (!rec?.path) continue;
+        const { data: signed } = await getSupabase()
+          .storage.from('lc-speaking-recordings')
+          .createSignedUrl(rec.path, 60 * 60);
+        if (signed?.signedUrl) {
+          audio.push({ label: rec.part ? `Part ${rec.part}` : 'Recording', url: signed.signedUrl });
+        }
+      }
+
+      if (turns.length > 0 || audio.length > 0) {
+        result.set(live.practice_attempt_id, { kind: 'speaking', turns, audio });
+      }
+    }
+  }
+
+  for (const row of speaking) {
+    if (result.has(row.id)) continue;
+    const details = row.score_details as { transcript?: unknown; recordingUrl?: unknown } | null;
+    const audioTranscript = typeof details?.transcript === 'string' ? details.transcript.trim() : '';
+    const audioUrl = typeof details?.recordingUrl === 'string' ? details.recordingUrl : '';
+
+    if (audioTranscript || audioUrl) {
+      result.set(row.id, {
+        kind: 'speaking',
+        turns: audioTranscript ? [{ role: 'student', text: audioTranscript }] : [],
+        audio: audioUrl ? [{ label: 'Recording', url: audioUrl }] : [],
+      });
+    }
+  }
+
+  return result;
+}
+
 // GET /api/v1/practice/attempts/mine
 export async function getMyAttempts(req: Request, res: Response, next: NextFunction) {
   try {
@@ -134,7 +205,13 @@ export async function getMyAttempts(req: Request, res: Response, next: NextFunct
 
     const { data, error } = await query;
     if (error) throw error;
-    return res.json({ success: true, data });
+
+    const speakingAnswers = await speakingAnswersFor(data ?? []);
+    const rows = (data ?? []).map((row) => ({
+      ...row,
+      answer: row.answer ?? speakingAnswers.get(row.id) ?? null,
+    }));
+    return res.json({ success: true, data: rows });
   } catch (error) {
     next(error);
   }
@@ -153,51 +230,7 @@ export async function getAdminPracticeLogs(req: Request, res: Response, next: Ne
 
     if (error) throw error;
 
-    // Speaking attempts saved before answers were stored have no `answer`.
-    // Rebuild their transcript: realtime sessions from lc_speaking_live_attempts,
-    // recorded audio from the transcript kept in score_details.
-    const speakingIds = (attempts ?? [])
-      .filter((row) => row.question_type?.startsWith('speaking') && !row.answer)
-      .map((row) => row.id);
-    const liveSpeaking = new Map<
-      string,
-      { turns: { role: string; text: string }[]; audio: { label: string; url: string }[] }
-    >();
-
-    if (speakingIds.length > 0) {
-      const { data: liveRows, error: liveError } = await getSupabase()
-        .from('lc_speaking_live_attempts')
-        .select('practice_attempt_id, transcript, recordings')
-        .in('practice_attempt_id', speakingIds);
-
-      if (liveError) throw liveError;
-
-      for (const live of liveRows ?? []) {
-        const turns = (Array.isArray(live.transcript) ? live.transcript : [])
-          .filter((turn: { text?: unknown }) => typeof turn?.text === 'string' && turn.text.trim())
-          .map((turn: { role?: string; text: string }) => ({
-            role: turn.role === 'candidate' ? 'student' : 'examiner',
-            text: turn.text,
-          }));
-
-        // Private bucket: sign each part recording so the admin can play it.
-        const recordings = Array.isArray(live.recordings) ? live.recordings : [];
-        const audio: { label: string; url: string }[] = [];
-        for (const rec of recordings as { part?: number; path?: string }[]) {
-          if (!rec?.path) continue;
-          const { data: signed } = await getSupabase()
-            .storage.from('lc-speaking-recordings')
-            .createSignedUrl(rec.path, 60 * 60);
-          if (signed?.signedUrl) {
-            audio.push({ label: rec.part ? `Part ${rec.part}` : 'Recording', url: signed.signedUrl });
-          }
-        }
-
-        if (turns.length > 0 || audio.length > 0) {
-          liveSpeaking.set(live.practice_attempt_id, { turns, audio });
-        }
-      }
-    }
+    const speakingAnswers = await speakingAnswersFor(attempts ?? []);
 
     const studentIds = [...new Set((attempts ?? []).map((row) => row.student_id))];
     const profileMap = new Map<string, { name?: string | null; email?: string | null }>();
@@ -219,23 +252,7 @@ export async function getAdminPracticeLogs(req: Request, res: Response, next: Ne
       const { score_details: scoreDetails, ...rest } = row;
       const profile = profileMap.get(row.student_id);
 
-      let answer = row.answer ?? null;
-      if (!answer && row.question_type?.startsWith('speaking')) {
-        const live = liveSpeaking.get(row.id);
-        const details = scoreDetails as { transcript?: unknown; recordingUrl?: unknown } | null;
-        const audioTranscript = typeof details?.transcript === 'string' ? details.transcript.trim() : '';
-        const audioUrl = typeof details?.recordingUrl === 'string' ? details.recordingUrl : '';
-
-        if (live) {
-          answer = { kind: 'speaking', turns: live.turns, audio: live.audio };
-        } else if (audioTranscript || audioUrl) {
-          answer = {
-            kind: 'speaking',
-            turns: audioTranscript ? [{ role: 'student', text: audioTranscript }] : [],
-            audio: audioUrl ? [{ label: 'Recording', url: audioUrl }] : [],
-          };
-        }
-      }
+      const answer = row.answer ?? speakingAnswers.get(row.id) ?? null;
 
       return {
         ...rest,
